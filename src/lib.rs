@@ -47,7 +47,8 @@ impl Peersey {
     }
 
     /// Join an open room using its public identifier.
-    pub async fn join_public_room(&self, id: RoomId) -> Result<Room, Error> {
+    pub async fn join_public_room(&self, id: impl AsRef<str>) -> Result<Room, Error> {
+        let id = RoomId::new(id.as_ref())?;
         Room::join_public(&id).await
     }
 
@@ -99,6 +100,9 @@ pub enum Error {
         /// Actual byte length.
         length: usize,
     },
+    /// Public room identifier was invalid.
+    #[error(transparent)]
+    RoomId(#[from] RoomIdParseError),
     /// Room discovery or gossip failed.
     #[error(transparent)]
     Rendezvous(#[from] iroh_gossip_rendezvous::Error),

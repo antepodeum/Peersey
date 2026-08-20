@@ -26,12 +26,11 @@ tokio = { version = "1", features = ["full"] }
 Join a named open room. No secret or peer address required:
 
 ```rust
-use peersey::{Peersey, RoomId};
+use peersey::Peersey;
 
 # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 let node = Peersey::start().await?;
-let id: RoomId = "community/rust:general".parse()?;
-let room = node.join_public_room(id).await?;
+let room = node.join_public_room("community/rust:general").await?;
 room.send("hello everyone").await?;
 # Ok(())
 # }

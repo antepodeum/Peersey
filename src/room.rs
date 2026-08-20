@@ -47,6 +47,12 @@ impl fmt::Display for RoomId {
     }
 }
 
+impl AsRef<str> for RoomId {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
 impl FromStr for RoomId {
     type Err = RoomIdParseError;
 
