@@ -9,7 +9,80 @@ use tokio::sync::broadcast;
 
 use crate::Error;
 
-const ROOM_PROTOCOL: &str = "peersey/private-room/v1";
+const PUBLIC_ROOM_PROTOCOL: &str = "peersey/public-room/v1";
+const PRIVATE_ROOM_PROTOCOL: &str = "peersey/private-room/v1";
+const MAX_ROOM_ID_LEN: usize = 128;
+
+/// Public identifier for an open room.
+///
+/// Anyone who knows this value can discover and join the room. Use a memorable
+/// ID for shared public spaces or [`RoomId::random`] for an unlisted room.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RoomId(String);
+
+impl RoomId {
+    /// Create a validated public room identifier.
+    pub fn new(value: impl Into<String>) -> Result<Self, RoomIdParseError> {
+        let value = value.into();
+        validate_room_id(&value)?;
+        Ok(Self(value))
+    }
+
+    /// Generate an unlisted public room identifier.
+    #[must_use]
+    pub fn random() -> Self {
+        Self(hex::encode(rand::random::<[u8; 16]>()))
+    }
+
+    /// Borrow the identifier.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for RoomId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl FromStr for RoomId {
+    type Err = RoomIdParseError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::new(value)
+    }
+}
+
+/// Error returned when parsing a public room identifier.
+#[derive(Debug, ThisError, PartialEq, Eq)]
+pub enum RoomIdParseError {
+    /// Identifier was empty.
+    #[error("room ID must not be empty")]
+    Empty,
+    /// Identifier exceeded 128 bytes.
+    #[error("room ID must be at most {MAX_ROOM_ID_LEN} bytes, got {0}")]
+    TooLong(usize),
+    /// Identifier contained a character unsafe for URLs and command lines.
+    #[error("room ID contains invalid character {character:?} at byte {index}")]
+    InvalidCharacter { index: usize, character: char },
+}
+
+fn validate_room_id(value: &str) -> Result<(), RoomIdParseError> {
+    if value.is_empty() {
+        return Err(RoomIdParseError::Empty);
+    }
+    if value.len() > MAX_ROOM_ID_LEN {
+        return Err(RoomIdParseError::TooLong(value.len()));
+    }
+    if let Some((index, character)) = value.char_indices().find(|(_, character)| {
+        !character.is_ascii_alphanumeric() && !matches!(character, '-' | '_' | '.' | ':' | '/')
+    }) {
+        return Err(RoomIdParseError::InvalidCharacter { index, character });
+    }
+    Ok(())
+}
 
 /// Secret 256-bit capability required to discover and join a private room.
 ///
@@ -72,7 +145,7 @@ pub enum RoomKeyParseError {
     InvalidLength(usize),
 }
 
-/// Event received from a private room.
+/// Event received from a public or private room.
 #[derive(Debug, Clone)]
 pub enum RoomEvent {
     /// A direct gossip neighbor connected.
@@ -104,20 +177,27 @@ impl Subscription {
     }
 }
 
-/// A live private pub/sub room.
+/// A live public or private pub/sub room.
 pub struct Room {
-    key: RoomKey,
     rendezvous: Rendezvous,
 }
 
 impl Room {
-    pub(crate) async fn join(key: RoomKey) -> Result<Self, Error> {
+    pub(crate) async fn join_public(id: &RoomId) -> Result<Self, Error> {
+        Self::join(id.as_str(), PUBLIC_ROOM_PROTOCOL).await
+    }
+
+    pub(crate) async fn join_private(key: RoomKey) -> Result<Self, Error> {
+        Self::join(&key.to_string(), PRIVATE_ROOM_PROTOCOL).await
+    }
+
+    async fn join(passphrase: &str, protocol: &str) -> Result<Self, Error> {
         let rendezvous = Rendezvous::builder()
-            .passphrase(&key.to_string())
-            .app_salt(ROOM_PROTOCOL)
+            .passphrase(passphrase)
+            .app_salt(protocol)
             .build()
             .await?;
-        Ok(Self { key, rendezvous })
+        Ok(Self { rendezvous })
     }
 
     /// Broadcast a message to current room members.
@@ -132,12 +212,6 @@ impl Room {
         Subscription {
             inner: self.rendezvous.subscribe(),
         }
-    }
-
-    /// Secret capability for this room.
-    #[must_use]
-    pub const fn key(&self) -> RoomKey {
-        self.key
     }
 
     /// This room connection's peer identity.
@@ -160,6 +234,25 @@ mod tests {
     fn key_round_trips() {
         let key = RoomKey::from_bytes([0xab; 32]);
         assert_eq!(key.to_string().parse::<RoomKey>().unwrap(), key);
+    }
+
+    #[test]
+    fn public_id_round_trips() {
+        let id: RoomId = "rust/networking.v1".parse().unwrap();
+        assert_eq!(id.as_str(), "rust/networking.v1");
+        assert_eq!(id.to_string().parse::<RoomId>().unwrap(), id);
+    }
+
+    #[test]
+    fn public_id_rejects_unsafe_values() {
+        assert_eq!("".parse::<RoomId>().unwrap_err(), RoomIdParseError::Empty);
+        assert!(matches!(
+            "room with spaces".parse::<RoomId>().unwrap_err(),
+            RoomIdParseError::InvalidCharacter {
+                index: 4,
+                character: ' '
+            }
+        ));
     }
 
     #[test]

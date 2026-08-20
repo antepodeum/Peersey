@@ -28,8 +28,8 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     let node = Peersey::start().await.context("start Peersey")?;
     let (room, room_key) = match args.room {
-        Some(key) => (node.join_room(key).await.context("join room")?, key),
-        None => node.create_room().await.context("create room")?,
+        Some(key) => (node.join_private_room(key).await.context("join room")?, key),
+        None => node.create_private_room().await.context("create room")?,
     };
 
     println!("Peersey private chat");
