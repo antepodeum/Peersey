@@ -1,7 +1,7 @@
 //! Batteries-included peer-to-peer messaging and file sharing.
 //!
-//! [`Peersey`] owns the networking and storage. Applications only handle
-//! public room IDs, private room keys, and share links.
+//! [`Peersey`] owns networking and storage. Applications only handle public
+//! room names, private room keys, and share links.
 //!
 //! Room discovery uses the public BitTorrent Mainline DHT. Private rooms derive
 //! their DHT coordinates and encrypted rendezvous records from a secret
@@ -11,49 +11,54 @@ mod content;
 mod room;
 
 pub use content::ShareLink;
-pub use room::{
-    Room, RoomEvent, RoomId, RoomIdParseError, RoomKey, RoomKeyParseError, Subscription,
-};
+pub use room::{Room, RoomEvent, RoomKey, RoomKeyParseError, Subscription};
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use content::ContentNode;
 use thiserror::Error as ThisError;
+use tokio::sync::OnceCell;
 
 /// A running Peersey node.
 ///
-/// Start one node per application and create or join rooms from it. The default
-/// node uses an automatically managed temporary on-disk content store.
+/// Create one node per application. Content networking and storage start lazily
+/// on the first file operation, so room-only applications stay lightweight.
 pub struct Peersey {
-    content: ContentNode,
+    content: OnceCell<ContentNode>,
+    storage: Option<PathBuf>,
 }
 
 impl Peersey {
-    /// Start a zero-configuration node.
-    pub async fn start() -> Result<Self, Error> {
-        Ok(Self {
-            content: ContentNode::temporary().await?,
-        })
+    /// Create a zero-configuration node.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            content: OnceCell::const_new(),
+            storage: None,
+        }
     }
 
-    /// Start a node whose content store lives at `path`.
-    pub async fn persistent(path: impl AsRef<Path>) -> Result<Self, Error> {
-        Ok(Self {
-            content: ContentNode::persistent(path.as_ref()).await?,
-        })
+    /// Create a node whose content and provider identity persist at `path`.
+    #[must_use]
+    pub fn persistent(path: impl Into<PathBuf>) -> Self {
+        Self {
+            content: OnceCell::const_new(),
+            storage: Some(path.into()),
+        }
     }
 
-    /// Create and join an open room with a new public identifier.
-    pub async fn create_public_room(&self) -> Result<(Room, RoomId), Error> {
-        let id = RoomId::random();
-        let room = Room::join_public(&id).await?;
-        Ok((room, id))
+    /// Create and join an open room with a random public name.
+    pub async fn create_public_room(&self) -> Result<(Room, String), Error> {
+        let name = hex::encode(rand::random::<[u8; 16]>());
+        let room = Room::join_public(&name).await?;
+        Ok((room, name))
     }
 
-    /// Join an open room using its public identifier.
-    pub async fn join_public_room(&self, id: impl AsRef<str>) -> Result<Room, Error> {
-        let id = RoomId::new(id.as_ref())?;
-        Room::join_public(&id).await
+    /// Join an open room using its public name.
+    ///
+    /// Leading and trailing whitespace is ignored.
+    pub async fn join_public_room(&self, name: impl AsRef<str>) -> Result<Room, Error> {
+        Room::join_public(name.as_ref()).await
     }
 
     /// Create and join a new private room.
@@ -70,7 +75,7 @@ impl Peersey {
 
     /// Import and host a file until this node shuts down.
     pub async fn share_file(&self, path: impl AsRef<Path>) -> Result<ShareLink, Error> {
-        self.content.share_file(path.as_ref()).await
+        self.content().await?.share_file(path.as_ref()).await
     }
 
     /// Download a shared file, verify it, and write it to `destination`.
@@ -79,14 +84,37 @@ impl Peersey {
         link: &ShareLink,
         destination: impl AsRef<Path>,
     ) -> Result<u64, Error> {
-        self.content.fetch_file(link, destination.as_ref()).await
+        self.content()
+            .await?
+            .fetch_file(link, destination.as_ref())
+            .await
     }
 
     /// Stop file serving and close the content endpoint.
     ///
     /// Rooms have independent lifetimes and should be shut down separately.
-    pub async fn shutdown(&self) -> Result<(), Error> {
-        self.content.shutdown().await
+    pub async fn shutdown(self) -> Result<(), Error> {
+        match self.content.get() {
+            Some(content) => content.shutdown().await,
+            None => Ok(()),
+        }
+    }
+
+    async fn content(&self) -> Result<&ContentNode, Error> {
+        self.content
+            .get_or_try_init(|| async {
+                match self.storage.as_deref() {
+                    Some(path) => ContentNode::persistent(path).await,
+                    None => ContentNode::temporary().await,
+                }
+            })
+            .await
+    }
+}
+
+impl Default for Peersey {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -104,9 +132,9 @@ pub enum Error {
         /// Actual byte length.
         length: usize,
     },
-    /// Public room identifier was invalid.
-    #[error(transparent)]
-    RoomId(#[from] RoomIdParseError),
+    /// Public room name was empty or too long.
+    #[error("room name must be 1-128 bytes")]
+    InvalidRoomName,
     /// Room discovery or gossip failed.
     #[error(transparent)]
     Rendezvous(#[from] iroh_gossip_rendezvous::Error),
@@ -118,5 +146,27 @@ pub enum Error {
 impl Error {
     pub(crate) fn p2p(error: impl std::error::Error + Send + Sync + 'static) -> Self {
         Self::P2p(Box::new(error))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn unused_node_starts_no_content_services() {
+        let node = Peersey::new();
+        assert!(node.content.get().is_none());
+        node.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn persistent_node_creates_nothing_until_file_use() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = directory.path().join("storage");
+        let node = Peersey::persistent(&storage);
+        assert!(!storage.exists());
+        node.shutdown().await.unwrap();
+        assert!(!storage.exists());
     }
 }

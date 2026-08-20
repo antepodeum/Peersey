@@ -11,83 +11,20 @@ use crate::Error;
 
 const PUBLIC_ROOM_PROTOCOL: &str = "peersey/public-room/v1";
 const PRIVATE_ROOM_PROTOCOL: &str = "peersey/private-room/v1";
-const MAX_ROOM_ID_LEN: usize = 128;
+const MAX_ROOM_NAME_LEN: usize = 128;
 
-/// Public identifier for an open room.
-///
-/// Anyone who knows this value can discover and join the room. Use a memorable
-/// ID for shared public spaces or [`RoomId::random`] for an unlisted room.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct RoomId(String);
-
-impl RoomId {
-    /// Create a validated public room identifier.
-    pub fn new(value: impl Into<String>) -> Result<Self, RoomIdParseError> {
-        let value = value.into();
-        validate_room_id(&value)?;
-        Ok(Self(value))
-    }
-
-    /// Generate an unlisted public room identifier.
-    #[must_use]
-    pub fn random() -> Self {
-        Self(hex::encode(rand::random::<[u8; 16]>()))
-    }
-
-    /// Borrow the identifier.
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.0
+fn validate_room_name(value: &str) -> Result<(), Error> {
+    if !value.is_empty() && value.len() <= MAX_ROOM_NAME_LEN {
+        Ok(())
+    } else {
+        Err(Error::InvalidRoomName)
     }
 }
 
-impl fmt::Display for RoomId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl AsRef<str> for RoomId {
-    fn as_ref(&self) -> &str {
-        self.as_str()
-    }
-}
-
-impl FromStr for RoomId {
-    type Err = RoomIdParseError;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        Self::new(value)
-    }
-}
-
-/// Error returned when parsing a public room identifier.
-#[derive(Debug, ThisError, PartialEq, Eq)]
-pub enum RoomIdParseError {
-    /// Identifier was empty.
-    #[error("room ID must not be empty")]
-    Empty,
-    /// Identifier exceeded 128 bytes.
-    #[error("room ID must be at most {MAX_ROOM_ID_LEN} bytes, got {0}")]
-    TooLong(usize),
-    /// Identifier contained a character unsafe for URLs and command lines.
-    #[error("room ID contains invalid character {character:?} at byte {index}")]
-    InvalidCharacter { index: usize, character: char },
-}
-
-fn validate_room_id(value: &str) -> Result<(), RoomIdParseError> {
-    if value.is_empty() {
-        return Err(RoomIdParseError::Empty);
-    }
-    if value.len() > MAX_ROOM_ID_LEN {
-        return Err(RoomIdParseError::TooLong(value.len()));
-    }
-    if let Some((index, character)) = value.char_indices().find(|(_, character)| {
-        !character.is_ascii_alphanumeric() && !matches!(character, '-' | '_' | '.' | ':' | '/')
-    }) {
-        return Err(RoomIdParseError::InvalidCharacter { index, character });
-    }
-    Ok(())
+fn normalize_room_name(value: &str) -> Result<&str, Error> {
+    let value = value.trim();
+    validate_room_name(value)?;
+    Ok(value)
 }
 
 /// Secret 256-bit capability required to discover and join a private room.
@@ -162,7 +99,7 @@ pub enum RoomEvent {
     PeerLeft { peer: PublicKey },
     /// A message arrived.
     Message { content: Bytes },
-    /// Underlying gossip stream skipped events.
+    /// Room event stream skipped events because the receiver lagged.
     Lagged,
 }
 
@@ -173,15 +110,21 @@ pub struct Subscription {
 
 impl Subscription {
     /// Receive the next event.
-    pub async fn recv(&mut self) -> Result<RoomEvent, broadcast::error::RecvError> {
-        Ok(match self.inner.recv().await? {
-            api::Event::NeighborUp(peer) => RoomEvent::PeerJoined { peer },
-            api::Event::NeighborDown(peer) => RoomEvent::PeerLeft { peer },
-            api::Event::Received(message) => RoomEvent::Message {
+    ///
+    /// Returns [`None`] after the room closes. Both underlying lag conditions
+    /// become [`RoomEvent::Lagged`].
+    pub async fn recv(&mut self) -> Option<RoomEvent> {
+        match self.inner.recv().await {
+            Ok(api::Event::NeighborUp(peer)) => Some(RoomEvent::PeerJoined { peer }),
+            Ok(api::Event::NeighborDown(peer)) => Some(RoomEvent::PeerLeft { peer }),
+            Ok(api::Event::Received(message)) => Some(RoomEvent::Message {
                 content: message.content,
-            },
-            api::Event::Lagged => RoomEvent::Lagged,
-        })
+            }),
+            Ok(api::Event::Lagged) | Err(broadcast::error::RecvError::Lagged(_)) => {
+                Some(RoomEvent::Lagged)
+            }
+            Err(broadcast::error::RecvError::Closed) => None,
+        }
     }
 }
 
@@ -191,8 +134,9 @@ pub struct Room {
 }
 
 impl Room {
-    pub(crate) async fn join_public(id: &RoomId) -> Result<Self, Error> {
-        Self::join(id.as_str(), PUBLIC_ROOM_PROTOCOL).await
+    pub(crate) async fn join_public(name: &str) -> Result<Self, Error> {
+        let name = normalize_room_name(name)?;
+        Self::join(name, PUBLIC_ROOM_PROTOCOL).await
     }
 
     pub(crate) async fn join_private(key: RoomKey) -> Result<Self, Error> {
@@ -229,7 +173,7 @@ impl Room {
     }
 
     /// Leave the room and stop its discovery tasks.
-    pub async fn shutdown(&self) {
+    pub async fn shutdown(self) {
         self.rendezvous.shutdown().await;
     }
 }
@@ -245,22 +189,25 @@ mod tests {
     }
 
     #[test]
-    fn public_id_round_trips() {
-        let id: RoomId = "rust/networking.v1".parse().unwrap();
-        assert_eq!(id.as_str(), "rust/networking.v1");
-        assert_eq!(id.to_string().parse::<RoomId>().unwrap(), id);
+    fn public_name_is_valid() {
+        assert!(validate_room_name("rust/networking.v1").is_ok());
+        assert_eq!(
+            normalize_room_name("  public chat  ").unwrap(),
+            "public chat"
+        );
     }
 
     #[test]
-    fn public_id_rejects_unsafe_values() {
-        assert_eq!("".parse::<RoomId>().unwrap_err(), RoomIdParseError::Empty);
+    fn public_name_rejects_empty_or_long_values() {
         assert!(matches!(
-            "room with spaces".parse::<RoomId>().unwrap_err(),
-            RoomIdParseError::InvalidCharacter {
-                index: 4,
-                character: ' '
-            }
+            validate_room_name(""),
+            Err(Error::InvalidRoomName)
         ));
+        assert!(matches!(
+            validate_room_name(&"x".repeat(MAX_ROOM_NAME_LEN + 1)),
+            Err(Error::InvalidRoomName)
+        ));
+        assert!(validate_room_name("общий чат").is_ok());
     }
 
     #[test]

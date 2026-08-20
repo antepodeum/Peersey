@@ -1,4 +1,4 @@
-use peersey::Peersey;
+use peersey::{Peersey, ShareLink};
 
 #[tokio::test]
 async fn shares_and_fetches_a_file() {
@@ -8,9 +8,10 @@ async fn shares_and_fetches_a_file() {
     let expected = b"content-addressed hello";
     std::fs::write(&source_path, expected).unwrap();
 
-    let provider = Peersey::start().await.unwrap();
-    let receiver = Peersey::start().await.unwrap();
+    let provider = Peersey::new();
+    let receiver = Peersey::new();
     let link = provider.share_file(&source_path).await.unwrap();
+    let link: ShareLink = link.to_string().parse().unwrap();
 
     let size = receiver.fetch_file(&link, &destination_path).await.unwrap();
 

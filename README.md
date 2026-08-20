@@ -7,7 +7,7 @@ Mainline DHT records, blob stores, and transfer verification behind a small API.
 
 ```text
 Peersey
-├── public rooms: RoomId -> DHT discovery -> iroh-gossip
+├── public rooms: name -> DHT discovery -> iroh-gossip
 ├── private rooms: RoomKey -> secret-key rendezvous -> iroh-gossip
 └── content-addressed files
     └── ShareLink -> iroh-blobs -> verified download
@@ -29,25 +29,26 @@ Join a named open room. No secret or peer address required:
 use peersey::Peersey;
 
 # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-let node = Peersey::start().await?;
+let node = Peersey::new();
 let room = node.join_public_room("community/rust:general").await?;
 room.send("hello everyone").await?;
 # Ok(())
 # }
 ```
 
-Create an unlisted open room with a random public ID:
+Create an unlisted open room with a random public name:
 
 ```rust
 # async fn example(node: &peersey::Peersey) -> Result<(), peersey::Error> {
-let (room, id) = node.create_public_room().await?;
-println!("public room: {id}");
+let (room, name) = node.create_public_room().await?;
+println!("public room: {name}");
 # Ok(())
 # }
 ```
 
-Anyone knowing `RoomId` can join. Peersey does not yet provide a global room
-directory, so “public” means open membership, not globally searchable.
+Anyone knowing the room name can join. Peersey does not yet provide a global
+room directory, so “public” means open membership, not globally searchable.
+Leading and trailing whitespace in names is ignored.
 
 ## Private pub/sub
 
@@ -57,14 +58,14 @@ Create a room:
 use peersey::{Peersey, RoomEvent};
 
 # async fn example() -> Result<(), peersey::Error> {
-let node = Peersey::start().await?;
+let node = Peersey::new();
 let (room, key) = node.create_private_room().await?;
 println!("invite key: {key}");
 
 let mut events = room.subscribe();
 room.send("hello").await?;
 
-while let Ok(event) = events.recv().await {
+while let Some(event) = events.recv().await {
     if let RoomEvent::Message { content } = event {
         println!("{}", String::from_utf8_lossy(&content));
     }
@@ -79,7 +80,7 @@ Join from another process or machine:
 use peersey::{Peersey, RoomKey};
 
 # async fn example(invite: &str) -> Result<(), Box<dyn std::error::Error>> {
-let node = Peersey::start().await?;
+let node = Peersey::new();
 let key: RoomKey = invite.parse()?;
 let room = node.join_private_room(key).await?;
 room.send("joined").await?;
@@ -95,8 +96,8 @@ internally, so users cannot accidentally create incompatible rooms.
 Both public and private rooms use the public BitTorrent Mainline DHT. Peersey
 does not run a separate private DHT.
 
-- Public rooms deterministically derive rendezvous coordinates from the public
-  `RoomId`.
+- Public rooms deterministically derive rendezvous coordinates from their
+  public name.
 - Private rooms derive their gossip topic, DHT slot keys, and DHT record
   encryption keys from `RoomKey` plus Peersey's fixed internal protocol salt.
 - Peers with the same `RoomKey` derive the same coordinates and decrypt the
@@ -112,7 +113,7 @@ provide anonymity, hide all network activity, or protect a room after its
 use peersey::Peersey;
 
 # async fn example() -> Result<(), peersey::Error> {
-let node = Peersey::persistent("./peersey-data").await?;
+let node = Peersey::persistent("./peersey-data");
 let link = node.share_file("./video.mp4").await?;
 println!("{link}");
 
@@ -129,7 +130,7 @@ Fetch it:
 use peersey::{Peersey, ShareLink};
 
 # async fn example(text: &str) -> Result<(), Box<dyn std::error::Error>> {
-let node = Peersey::start().await?;
+let node = Peersey::new();
 let link: ShareLink = text.parse()?;
 let bytes = node.fetch_file(&link, "./video.mp4").await?;
 println!("downloaded {bytes} bytes; id={}", link.content_id());
@@ -138,14 +139,14 @@ node.shutdown().await?;
 # }
 ```
 
-Files are BLAKE3 content-addressed and verified while streaming. `start()` uses
-an automatically deleted temporary disk store. `persistent(path)` preserves
-content and provider identity across restarts, keeping previously issued links
-valid when the node comes back online.
+Files are BLAKE3 content-addressed and verified while streaming. File storage
+and networking start only when first used. `new()` uses an automatically
+deleted temporary disk store. `persistent(path)` preserves content and provider
+identity across restarts, keeping links valid when the node comes back online.
 
 ## Security model
 
-- `RoomId` is public and safe to log. Anyone knowing it can join.
+- Public room names are safe to log. Anyone knowing a name can join.
 - `RoomKey` is a secret capability. Anyone with it can discover and join the
   room. Its `Debug` output is redacted.
 - Room traffic uses Iroh's authenticated encrypted QUIC connections.
@@ -159,7 +160,7 @@ valid when the node comes back online.
 Peersey 0.2 intentionally exposes only:
 
 ```text
-Peersey   Room   RoomId   RoomKey   RoomEvent   ShareLink
+Peersey   Room   RoomKey   RoomEvent   ShareLink
 ```
 
 Current share links name one provider. Multi-provider discovery, automatic

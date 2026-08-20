@@ -5,12 +5,11 @@ use std::{
 };
 
 use iroh::{
-    Endpoint, SecretKey,
-    address_lookup::memory::MemoryLookup,
-    endpoint::presets,
-    protocol::{Router, RouterBuilder},
+    Endpoint, SecretKey, address_lookup::memory::MemoryLookup, endpoint::presets, protocol::Router,
 };
-use iroh_blobs::{BlobsProtocol, store::fs::FsStore, ticket::BlobTicket};
+use iroh_blobs::{
+    BlobsProtocol, api::downloader::Downloader, store::fs::FsStore, ticket::BlobTicket,
+};
 
 use crate::Error;
 
@@ -49,6 +48,7 @@ impl FromStr for ShareLink {
 pub(crate) struct ContentNode {
     router: Router,
     store: FsStore,
+    downloader: Downloader,
     addresses: MemoryLookup,
     _temporary: Option<tempfile::TempDir>,
 }
@@ -77,12 +77,14 @@ impl ContentNode {
         }
         let endpoint = endpoint.bind().await.map_err(Error::p2p)?;
         let blobs = BlobsProtocol::new(&store, None);
-        let router = RouterBuilder::new(endpoint)
+        let router = Router::builder(endpoint)
             .accept(iroh_blobs::ALPN, blobs)
             .spawn();
+        let downloader = store.downloader(router.endpoint());
         Ok(Self {
             router,
             store,
+            downloader,
             addresses,
             _temporary: temporary,
         })
@@ -96,6 +98,11 @@ impl ContentNode {
             .add_path(path)
             .await
             .map_err(Error::p2p)?;
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(iroh::NET_REPORT_TIMEOUT),
+            self.router.endpoint().online(),
+        )
+        .await;
         let ticket = BlobTicket::new(self.router.endpoint().addr(), tag.hash, tag.format);
         Ok(ShareLink(ticket))
     }
@@ -107,8 +114,7 @@ impl ContentNode {
     ) -> Result<u64, Error> {
         let destination = std::path::absolute(destination)?;
         self.addresses.add_endpoint_info(link.0.addr().clone());
-        self.store
-            .downloader(self.router.endpoint())
+        self.downloader
             .download(link.0.hash(), Some(link.0.addr().id))
             .await
             .map_err(Error::p2p)?;
@@ -125,36 +131,26 @@ impl ContentNode {
 }
 
 fn load_or_create_identity(root: &Path) -> Result<SecretKey, Error> {
-    const KEY_LEN: usize = 32;
-
     std::fs::create_dir_all(root)?;
     let path = root.join("identity.key");
     match std::fs::read(&path) {
-        Ok(bytes) => {
-            let bytes: [u8; KEY_LEN] =
-                bytes
-                    .try_into()
-                    .map_err(|bytes: Vec<u8>| Error::InvalidIdentity {
-                        path,
-                        length: bytes.len(),
-                    })?;
-            Ok(SecretKey::from_bytes(&bytes))
-        }
+        Ok(bytes) => parse_identity(&path, bytes),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             let key = SecretKey::generate();
             write_new_identity(&path, &key.to_bytes())?;
-            let bytes = std::fs::read(&path)?;
-            let bytes: [u8; KEY_LEN] =
-                bytes
-                    .try_into()
-                    .map_err(|bytes: Vec<u8>| Error::InvalidIdentity {
-                        path,
-                        length: bytes.len(),
-                    })?;
-            Ok(SecretKey::from_bytes(&bytes))
+            parse_identity(&path, std::fs::read(&path)?)
         }
         Err(error) => Err(error.into()),
     }
+}
+
+fn parse_identity(path: &Path, bytes: Vec<u8>) -> Result<SecretKey, Error> {
+    let length = bytes.len();
+    let bytes: [u8; 32] = bytes.try_into().map_err(|_| Error::InvalidIdentity {
+        path: path.to_owned(),
+        length,
+    })?;
+    Ok(SecretKey::from_bytes(&bytes))
 }
 
 fn write_new_identity(path: &Path, bytes: &[u8; 32]) -> Result<(), Error> {

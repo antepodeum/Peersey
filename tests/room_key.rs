@@ -14,3 +14,8 @@ fn uppercase_hex_is_accepted_and_normalized() {
     let key: RoomKey = upper.parse().unwrap();
     assert_eq!(key.to_string(), "ab".repeat(32));
 }
+
+#[test]
+fn random_keys_are_distinct() {
+    assert_ne!(RoomKey::random(), RoomKey::random());
+}

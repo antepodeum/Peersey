@@ -4,6 +4,7 @@ version = "0.2.0"
 edition = "2024"
 rust-version = "1.93"
 description = "Batteries-included P2P messaging and content sharing"
+repository = "https://github.com/antepodeum/Peersey"
 license = "MIT OR Apache-2.0"
 keywords = ["iroh", "p2p", "pubsub", "file-sharing", "dht"]
 categories = ["network-programming"]
@@ -12,13 +13,13 @@ categories = ["network-programming"]
 bytes = "1"
 hex = "0.4"
 iroh = "=1.0.0-rc.0"
-iroh-blobs = "=0.101.0"
+iroh-blobs = { version = "=0.101.0", default-features = false, features = ["fs-store"] }
 iroh-gossip = "0.99"
 iroh-gossip-rendezvous = "0.2.1"
 rand = "0.9"
 thiserror = "2"
 tempfile = "3"
-tokio = { version = "1", features = ["sync"] }
+tokio = { version = "1", features = ["sync", "time"] }
 
 [dev-dependencies]
 anyhow = "1"

@@ -26,7 +26,7 @@ struct ChatMessage {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
-    let node = Peersey::start().await.context("start Peersey")?;
+    let node = Peersey::new();
     let (room, room_key) = match args.room {
         Some(key) => (node.join_private_room(key).await.context("join room")?, key),
         None => node.create_private_room().await.context("create room")?,
@@ -65,21 +65,18 @@ async fn main() -> Result<()> {
             }
             event = events.recv() => {
                 match event {
-                    Ok(RoomEvent::Message { content }) => {
+                    Some(RoomEvent::Message { content }) => {
                         match postcard::from_bytes::<ChatMessage>(&content) {
                             Ok(message) => println!("{}: {}", message.name, message.text),
                             Err(error) => eprintln!("ignored invalid chat message: {error}"),
                         }
                     }
-                    Ok(RoomEvent::PeerJoined { peer }) => println!("[peer joined: {peer}]"),
-                    Ok(RoomEvent::PeerLeft { peer }) => println!("[peer left: {peer}]"),
-                    Ok(RoomEvent::Lagged) => {
-                        eprintln!("[iroh-gossip lagged; some gossip events were skipped]");
+                    Some(RoomEvent::PeerJoined { peer }) => println!("[peer joined: {peer}]"),
+                    Some(RoomEvent::PeerLeft { peer }) => println!("[peer left: {peer}]"),
+                    Some(RoomEvent::Lagged) => {
+                        eprintln!("[lagged; some events were skipped]");
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        eprintln!("[lagged; skipped {n} events]");
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    None => break,
                 }
             }
             _ = tokio::signal::ctrl_c() => {
