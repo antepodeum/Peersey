@@ -226,10 +226,23 @@ without exposing lower-level Iroh configuration.
 
 ## Chat example
 
+Create a private room. First argument is your display name:
+
 ```bash
-cargo run --example chat -- --name alice
-cargo run --example chat -- --name bob --room <secret-room-key>
+cargo run --example chat -- alice
 ```
+
+The chat prints a private invite key. Give it only to people you want in the
+room. They join by passing their name and that key:
+
+```bash
+cargo run --example chat -- bob <private-invite-key>
+```
+
+The prompt supports line editing and history. Incoming messages redraw safely
+without destroying text being entered. Use `/help` for commands, `/room` to
+show the invite again, `/clear` to clear the terminal, and `/quit`, Ctrl+C, or
+Ctrl+D to leave cleanly.
 
 ## License
 
