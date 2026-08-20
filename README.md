@@ -1,52 +1,43 @@
 # Peersey
 
-Zero-config peer discovery for [`iroh-gossip`](https://github.com/n0-computer/iroh-gossip).
+Batteries-included P2P messaging and content sharing for Rust.
 
-Peersey removes the bootstrap-peer argument from the application model. Peers that know the same random 256-bit `TopicKey` discover each other through the BitTorrent Mainline DHT and then communicate over `iroh-gossip`.
+Peersey hides endpoint addresses, relays, hole punching, protocol routing,
+Mainline DHT records, blob stores, and transfer verification behind a small API.
 
 ```text
-TopicKey
-   │
-   ├─ Mainline DHT rendezvous
-   │       ↓
-   │   discovered peers
-   │       ↓
-   └─ iroh-gossip swarm
-           ↓
-      publish / subscribe
+Peersey
+├── private pub/sub rooms
+│   └── RoomKey -> DHT discovery -> iroh-gossip
+└── content-addressed files
+    └── ShareLink -> iroh-blobs -> verified download
 ```
 
-There are no IP addresses, endpoint IDs, trackers, tickets, or bootstrap peer lists in the application configuration.
-
-## Status
-
-Peersey 0.1 is intentionally small. It is an ergonomic layer over `iroh-gossip-rendezvous`, which already implements the difficult DHT rendezvous/healing protocol. Peersey does not reimplement Mainline DHT, gossip, durable queues, QoS, or application authorization.
-
-A `TopicKey` is a capability: anyone who knows it can discover and join that swarm. If an application needs authorization separate from discovery, authenticate application messages or connections separately.
-
-## Usage
+## Install
 
 ```toml
 [dependencies]
-peersey = "0.1"
-bytes = "1"
+peersey = "0.2"
+tokio = { version = "1", features = ["full"] }
 ```
 
+## Private pub/sub
+
+Create a room:
+
 ```rust
-use bytes::Bytes;
-use peersey::{Event, Peersey, TopicKey};
+use peersey::{Peersey, RoomEvent};
 
 # async fn example() -> Result<(), peersey::Error> {
-let topic = TopicKey::random();
-println!("share this once: {topic}");
+let node = Peersey::start().await?;
+let (room, key) = node.create_room().await?;
+println!("invite key: {key}");
 
-let room = Peersey::join(topic).await?;
 let mut events = room.subscribe();
-
-room.publish(Bytes::from_static(b"hello")).await?;
+room.send("hello").await?;
 
 while let Ok(event) = events.recv().await {
-    if let Event::Message { content } = event {
+    if let RoomEvent::Message { content } = event {
         println!("{}", String::from_utf8_lossy(&content));
     }
 }
@@ -54,90 +45,89 @@ while let Ok(event) = events.recv().await {
 # }
 ```
 
-On another machine, parse the same key and join it:
+Join from another process or machine:
 
 ```rust
-use peersey::{Peersey, TopicKey};
+use peersey::{Peersey, RoomKey};
 
-# async fn example(text: &str) -> Result<(), Box<dyn std::error::Error>> {
-let topic: TopicKey = text.parse()?;
-let room = Peersey::join(topic).await?;
-# drop(room);
+# async fn example(invite: &str) -> Result<(), Box<dyn std::error::Error>> {
+let node = Peersey::start().await?;
+let key: RoomKey = invite.parse()?;
+let room = node.join_room(key).await?;
+room.send("joined").await?;
 # Ok(())
 # }
 ```
+
+No public `namespace` exists. Peersey keeps protocol domain separation fixed
+internally, so users cannot accidentally create incompatible rooms.
+
+## Host a file
+
+```rust
+use peersey::Peersey;
+
+# async fn example() -> Result<(), peersey::Error> {
+let node = Peersey::persistent("./peersey-data").await?;
+let link = node.share_file("./video.mp4").await?;
+println!("{link}");
+
+// Keep the node alive while the file should remain available.
+tokio::signal::ctrl_c().await?;
+node.shutdown().await?;
+# Ok(())
+# }
+```
+
+Fetch it:
+
+```rust
+use peersey::{Peersey, ShareLink};
+
+# async fn example(text: &str) -> Result<(), Box<dyn std::error::Error>> {
+let node = Peersey::start().await?;
+let link: ShareLink = text.parse()?;
+let bytes = node.fetch_file(&link, "./video.mp4").await?;
+println!("downloaded {bytes} bytes; id={}", link.content_id());
+node.shutdown().await?;
+# Ok(())
+# }
+```
+
+Files are BLAKE3 content-addressed and verified while streaming. `start()` uses
+an automatically deleted temporary disk store. `persistent(path)` preserves
+content and provider identity across restarts, keeping previously issued links
+valid when the node comes back online.
+
+## Security model
+
+- `RoomKey` is a secret capability. Anyone with it can discover and join the
+  room. Its `Debug` output is redacted.
+- Room traffic uses Iroh's authenticated encrypted QUIC connections.
+- `ShareLink` is not secret or access-controlled. Anyone holding it can request
+  the content while its provider is online.
+- Peersey 0.2 does not yet provide member roles, revocation, key rotation, or
+  content encryption.
+
+## Scope
+
+Peersey 0.2 intentionally exposes only:
+
+```text
+Peersey   Room   RoomKey   RoomEvent   ShareLink
+```
+
+Current share links name one provider. Multi-provider discovery, automatic
+rehosting, directory manifests, and managed room membership can be added later
+without exposing lower-level Iroh configuration.
 
 ## Chat example
 
-Create a room:
-
 ```bash
 cargo run --example chat -- --name alice
+cargo run --example chat -- --name bob --room <secret-room-key>
 ```
-
-It prints a topic key such as:
-
-```text
-4dcb...<64 hex characters total>...91ae
-```
-
-On another machine, the only shared network-specific value is that key:
-
-```bash
-cargo run --example chat -- --name bob --topic 4dcb...91ae
-```
-
-Neither side supplies the other's IP address, iroh endpoint ID, or any bootstrap peer.
-
-## API
-
-The default path is deliberately short:
-
-```rust
-let room = Peersey::join(topic_key).await?;
-let mut events = room.subscribe();
-room.publish(bytes).await?;
-```
-
-For application isolation or startup behavior:
-
-```rust
-use std::time::Duration;
-use peersey::Peersey;
-
-# async fn example(topic_key: peersey::TopicKey) -> Result<(), peersey::Error> {
-let room = Peersey::builder(topic_key)
-    .namespace("my-app/v1")
-    .wait_for_first_peer(Duration::from_secs(2))
-    .join()
-    .await?;
-# drop(room);
-# Ok(())
-# }
-```
-
-`namespace` is a compile-time/application convention, not a peer address or bootstrap configuration. Peers must use the same namespace and topic key.
-
-## Semantics
-
-- `TopicKey` is 32 random bytes, encoded as 64 lowercase hex characters.
-- The key is used as the rendezvous capability; Peersey does not publish it directly as plaintext DHT metadata.
-- The underlying rendezvous derives its own `iroh-gossip::TopicId` from the topic key and namespace.
-- Discovery is continuous. DHT maintenance stays active while the `Peersey` handle is alive.
-- Gossip messages are ephemeral broadcast messages. Peersey is not a durable broker.
-- In 0.1, one `Peersey` handle represents one topic. Multiple topics can be joined with multiple handles. Sharing a single iroh endpoint across many independently discovered topics is intentionally left out of the minimal API for now.
-
-## Why not implement the DHT layer here?
-
-The hard part is not calling `iroh-gossip::subscribe`; it is safely maintaining a many-peer rendezvous set inside BEP 44's mutable-value constraints while peers concurrently arrive, disappear, and overwrite DHT state. `iroh-gossip-rendezvous` already provides sharded slots, logical aging, vouching, healing, and encrypted DHT records. Peersey keeps that protocol below the public API instead of duplicating it.
 
 ## License
 
 MIT OR Apache-2.0
-
-
-## Compatibility note
-
-Peersey exposes `Event::Lagged` because `iroh-gossip` can report that its own
-event stream fell behind. This is distinct from Tokio broadcast receiver lag,
-which is returned as `RecvError::Lagged(n)` by `Subscription::recv`.
