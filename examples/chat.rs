@@ -58,7 +58,6 @@ enum FeedItem {
     Chat {
         name: String,
         text: String,
-        own: bool,
     },
     Presence {
         name: Option<String>,
@@ -270,11 +269,10 @@ impl App {
         self.cursor = self.input.len();
     }
 
-    fn push_chat(&mut self, name: impl Into<String>, text: impl Into<String>, own: bool) {
+    fn push_chat(&mut self, name: impl Into<String>, text: impl Into<String>) {
         self.feed.push(FeedItem::Chat {
             name: name.into(),
             text: text.into(),
-            own,
         });
         self.scroll_back = 0;
     }
@@ -465,12 +463,8 @@ impl App {
         self.feed
             .iter()
             .map(|item| match item {
-                FeedItem::Chat { name, text, own } => {
-                    let name_style = if *own {
-                        self.style(Color::Cyan).add_modifier(Modifier::BOLD)
-                    } else {
-                        self.user_style(name).add_modifier(Modifier::BOLD)
-                    };
+                FeedItem::Chat { name, text } => {
+                    let name_style = self.user_style(name).add_modifier(Modifier::BOLD);
                     Line::from(vec![
                         Span::styled(format!("{} › ", clean_name(name)), name_style),
                         Span::styled(clean_terminal_text(text), self.style(Color::White)),
@@ -538,7 +532,7 @@ impl App {
                 Span::styled("You  ", self.style(Color::DarkGray)),
                 Span::styled(
                     clean_name(&self.name),
-                    self.style(Color::Cyan).add_modifier(Modifier::BOLD),
+                    self.user_style(&self.name).add_modifier(Modifier::BOLD),
                 ),
             ]),
             Line::styled(
@@ -747,7 +741,7 @@ async fn run_chat(
                         });
                         let payload = postcard::to_stdvec(&packet).context("encode chat message")?;
                         match room.send(payload).await {
-                            Ok(()) => app.push_chat(app.name.clone(), text, true),
+                            Ok(()) => app.push_chat(app.name.clone(), text),
                             Err(error) => {
                                 app.restore_input(text);
                                 app.push_error(format!("Send failed: {error}"));
@@ -761,7 +755,7 @@ async fn run_chat(
                     Some(RoomEvent::Message { content }) => {
                         match postcard::from_bytes::<ChatPacket>(&content) {
                             Ok(ChatPacket::Message(message)) => {
-                                app.push_chat(message.name, clean_terminal_text(&message.text), false);
+                                app.push_chat(message.name, clean_terminal_text(&message.text));
                             }
                             Ok(ChatPacket::Presence { peer, name, online_for_ms }) => {
                                 app.on_presence(peer, name, online_for_ms);
@@ -874,25 +868,34 @@ fn next_boundary(value: &str, cursor: usize) -> usize {
 }
 
 fn user_color(name: &str) -> Color {
-    const COLORS: [Color; 10] = [
-        Color::Green,
-        Color::Yellow,
-        Color::Magenta,
-        Color::Cyan,
-        Color::LightRed,
-        Color::LightGreen,
-        Color::LightYellow,
-        Color::LightBlue,
-        Color::LightMagenta,
-        Color::LightCyan,
-    ];
     let hash = name
         .as_bytes()
         .iter()
         .fold(0xcbf29ce484222325_u64, |hash, byte| {
             (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
         });
-    COLORS[hash as usize % COLORS.len()]
+    let hue = (hash % 360) as f32;
+    let saturation = 0.68 + ((hash >> 9) & 0x0f) as f32 / 100.0;
+    let lightness = 0.58 + ((hash >> 17) & 0x0f) as f32 / 200.0;
+    let (red, green, blue) = hsl_to_rgb(hue, saturation, lightness);
+    Color::Rgb(red, green, blue)
+}
+
+fn hsl_to_rgb(hue: f32, saturation: f32, lightness: f32) -> (u8, u8, u8) {
+    let chroma = (1.0 - (2.0 * lightness - 1.0).abs()) * saturation;
+    let hue_sector = hue / 60.0;
+    let secondary = chroma * (1.0 - (hue_sector.rem_euclid(2.0) - 1.0).abs());
+    let (red, green, blue) = match hue_sector as u8 {
+        0 => (chroma, secondary, 0.0),
+        1 => (secondary, chroma, 0.0),
+        2 => (0.0, chroma, secondary),
+        3 => (0.0, secondary, chroma),
+        4 => (secondary, 0.0, chroma),
+        _ => (chroma, 0.0, secondary),
+    };
+    let match_lightness = lightness - chroma / 2.0;
+    let channel = |value: f32| ((value + match_lightness) * 255.0).round() as u8;
+    (channel(red), channel(green), channel(blue))
 }
 
 fn elapsed_ms(started: Instant) -> u64 {
@@ -988,12 +991,20 @@ mod tests {
 
         app.on_peer_joined("fedcba9876543210".to_owned());
         app.on_presence("fedcba9876543210".to_owned(), "bob".to_owned(), 0);
-        app.push_chat("bob", "hello", false);
+        app.push_chat("bob", "hello");
         let wide = render_text(&app, 110, 28);
         assert!(wide.contains("CONNECTED"));
         assert!(wide.contains("CREATED HERE"));
         assert!(wide.contains("bob"));
         assert!(wide.contains("hello"));
+    }
+
+    #[test]
+    fn username_colors_are_stable_truecolor() {
+        let alice = user_color("alice");
+        assert_eq!(alice, user_color("alice"));
+        assert_ne!(alice, user_color("bob"));
+        assert!(matches!(alice, Color::Rgb(_, _, _)));
     }
 
     #[test]
