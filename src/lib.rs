@@ -157,6 +157,9 @@ pub enum Error {
     /// The publisher rejected the live stream capability.
     #[error("live stream access denied")]
     LiveAccessDenied,
+    /// A remote peer did not complete the live capability handshake.
+    #[error("live stream handshake timed out")]
+    LiveHandshakeTimeout,
     /// A malformed packet was received from a live stream.
     #[error("invalid live stream packet")]
     InvalidLivePacket,

@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use peersey::{LiveLink, MediaKind, Peersey};
+use peersey::{Error, LiveLink, MediaKind, Peersey};
 
 #[tokio::test]
 async fn streams_realtime_packets_between_nodes() {
@@ -11,6 +11,15 @@ async fn streams_realtime_packets_between_nodes() {
     let encoded = link.to_string();
     assert_eq!(encoded.parse::<LiveLink>().unwrap(), link);
     assert_eq!(format!("{link:?}"), "LiveLink([REDACTED])");
+
+    let mut denied = encoded.clone();
+    let last = denied.pop().unwrap();
+    denied.push(if last == '0' { '1' } else { '0' });
+    let denied = denied.parse::<LiveLink>().unwrap();
+    assert!(matches!(
+        viewer.watch_live(&denied).await,
+        Err(Error::LiveAccessDenied)
+    ));
 
     let mut receiver = tokio::time::timeout(Duration::from_secs(20), viewer.watch_live(&link))
         .await

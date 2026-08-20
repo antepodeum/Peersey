@@ -23,6 +23,8 @@ const HEADER_LEN: usize = 14;
 const MAX_PACKET_SIZE: usize = 8 * 1024 * 1024;
 const CHANNEL_CAPACITY: usize = 64;
 const SEND_CONCURRENCY: usize = 32;
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+const DENIAL_FLUSH_TIMEOUT: Duration = Duration::from_secs(1);
 
 type StreamSender = broadcast::Sender<Option<LivePacket>>;
 type StreamMap = HashMap<[u8; 32], StreamSender>;
@@ -274,7 +276,10 @@ impl LiveHost {
         let (mut send, mut receive) = connection.open_bi().await.map_err(Error::p2p)?;
         send.write_all(&link.0.token).await.map_err(Error::p2p)?;
         send.finish().map_err(Error::p2p)?;
-        let response = receive.read_to_end(1).await.map_err(Error::p2p)?;
+        let response = tokio::time::timeout(HANDSHAKE_TIMEOUT, receive.read_to_end(1))
+            .await
+            .map_err(|_| Error::LiveHandshakeTimeout)?
+            .map_err(Error::p2p)?;
         if response != [1] {
             return Err(Error::LiveAccessDenied);
         }
@@ -300,8 +305,13 @@ impl LiveHost {
 
 impl ProtocolHandler for LiveHost {
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
-        let (mut response, mut request) = connection.accept_bi().await?;
-        let Ok(token) = request.read_to_end(32).await else {
+        let Ok(streams) = tokio::time::timeout(HANDSHAKE_TIMEOUT, connection.accept_bi()).await
+        else {
+            return Ok(());
+        };
+        let (mut response, mut request) = streams?;
+        let Ok(Ok(token)) = tokio::time::timeout(HANDSHAKE_TIMEOUT, request.read_to_end(32)).await
+        else {
             return Ok(());
         };
         let sender = token
@@ -312,6 +322,7 @@ impl ProtocolHandler for LiveHost {
         let Some(sender) = sender else {
             if response.write_all(&[0]).await.is_ok() {
                 let _ = response.finish();
+                let _ = tokio::time::timeout(DENIAL_FLUSH_TIMEOUT, response.stopped()).await;
             }
             return Ok(());
         };
