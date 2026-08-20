@@ -6,6 +6,7 @@ use std::{
 
 use iroh::{
     Endpoint, SecretKey,
+    address_lookup::memory::MemoryLookup,
     endpoint::presets,
     protocol::{Router, RouterBuilder},
 };
@@ -48,6 +49,7 @@ impl FromStr for ShareLink {
 pub(crate) struct ContentNode {
     router: Router,
     store: FsStore,
+    addresses: MemoryLookup,
     _temporary: Option<tempfile::TempDir>,
 }
 
@@ -68,7 +70,8 @@ impl ContentNode {
         identity: Option<SecretKey>,
     ) -> Result<Self, Error> {
         let store = FsStore::load(path).await.map_err(Error::p2p)?;
-        let mut endpoint = Endpoint::builder(presets::N0);
+        let addresses = MemoryLookup::new();
+        let mut endpoint = Endpoint::builder(presets::N0).address_lookup(addresses.clone());
         if let Some(identity) = identity {
             endpoint = endpoint.secret_key(identity);
         }
@@ -80,6 +83,7 @@ impl ContentNode {
         Ok(Self {
             router,
             store,
+            addresses,
             _temporary: temporary,
         })
     }
@@ -102,6 +106,7 @@ impl ContentNode {
         destination: &Path,
     ) -> Result<u64, Error> {
         let destination = std::path::absolute(destination)?;
+        self.addresses.add_endpoint_info(link.0.addr().clone());
         self.store
             .downloader(self.router.endpoint())
             .download(link.0.hash(), Some(link.0.addr().id))
