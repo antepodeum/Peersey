@@ -239,11 +239,20 @@ room. They join by passing their name and that key:
 cargo run --example chat -- bob <private-invite-key>
 ```
 
-The prompt supports line editing and history. Incoming messages redraw safely
-without destroying text being entered. Wait for the `connected` status before
-sending; messages are not stored for offline peers. Use `/help` for commands,
-`/room` to show the invite again, `/clear` to clear the terminal, and `/quit`,
-Ctrl+C, or Ctrl+D to leave cleanly.
+The full-screen terminal UI updates connection state, participants, presence,
+messages, and the composer in place. Wide terminals include a room sidebar;
+smaller terminals use a compact chat layout. Wait for `CONNECTED` before
+sending because messages are not stored for offline peers.
+
+- `Enter`: send
+- `F1`: help and command reference
+- `F2`: show the private invite
+- `PageUp` / `PageDown`: browse chat history
+- `Ctrl+L`: clear the local chat view
+- `Ctrl+C`: leave and restore the terminal
+
+The `/room`, `/clear`, and `/quit` commands remain available. Prefix a message
+with `//` to send text beginning with a literal slash.
 
 ## License
 
