@@ -24,6 +24,9 @@ const MAX_PACKET_SIZE: usize = 8 * 1024 * 1024;
 const CHANNEL_CAPACITY: usize = 64;
 const SEND_CONCURRENCY: usize = 32;
 
+type StreamSender = broadcast::Sender<Option<LivePacket>>;
+type StreamMap = HashMap<[u8; 32], StreamSender>;
+
 /// Portable capability link for watching a live stream.
 ///
 /// Anyone holding this link can watch the stream while its publisher is
@@ -156,7 +159,7 @@ impl LivePacket {
 /// instead of adding unbounded latency.
 pub struct LiveStream {
     token: [u8; 32],
-    sender: broadcast::Sender<LivePacket>,
+    sender: StreamSender,
     host: LiveHost,
     started: Instant,
 }
@@ -190,17 +193,18 @@ impl LiveStream {
                 max: MAX_PACKET_SIZE,
             });
         }
-        let _ = self.sender.send(LivePacket {
+        let _ = self.sender.send(Some(LivePacket {
             kind,
             timestamp: self.started.elapsed(),
             content,
-        });
+        }));
         Ok(())
     }
 }
 
 impl Drop for LiveStream {
     fn drop(&mut self) {
+        let _ = self.sender.send(None);
         self.host.remove(self.token, &self.sender);
     }
 }
@@ -234,7 +238,7 @@ impl LiveReceiver {
 
 #[derive(Clone, Default)]
 pub(crate) struct LiveHost {
-    streams: Arc<Mutex<HashMap<[u8; 32], broadcast::Sender<LivePacket>>>>,
+    streams: Arc<Mutex<StreamMap>>,
 }
 
 impl fmt::Debug for LiveHost {
@@ -277,7 +281,7 @@ impl LiveHost {
         Ok(LiveReceiver { connection })
     }
 
-    fn remove(&self, token: [u8; 32], sender: &broadcast::Sender<LivePacket>) {
+    fn remove(&self, token: [u8; 32], sender: &StreamSender) {
         let mut streams = self.lock();
         if streams
             .get(&token)
@@ -287,7 +291,7 @@ impl LiveHost {
         }
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<[u8; 32], broadcast::Sender<LivePacket>>> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, StreamMap> {
         self.streams
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -311,16 +315,17 @@ impl ProtocolHandler for LiveHost {
             }
             return Ok(());
         };
+        let mut packets = sender.subscribe();
         if response.write_all(&[1]).await.is_err() {
             return Ok(());
         }
         response.finish()?;
 
-        let mut packets = sender.subscribe();
         let permits = Arc::new(tokio::sync::Semaphore::new(SEND_CONCURRENCY));
         loop {
             let packet = match packets.recv().await {
-                Ok(packet) => packet,
+                Ok(Some(packet)) => packet,
+                Ok(None) => break,
                 Err(broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(broadcast::error::RecvError::Closed) => break,
             };
