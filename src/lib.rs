@@ -1,4 +1,4 @@
-//! Batteries-included peer-to-peer messaging and file sharing.
+//! Batteries-included peer-to-peer messaging, live streaming, and file sharing.
 //!
 //! [`Peersey`] owns networking and storage. Applications only handle public
 //! room names, private room keys, and share links.
@@ -8,9 +8,11 @@
 //! [`RoomKey`]; they do not use a separate private DHT network.
 
 mod content;
+mod live;
 mod room;
 
 pub use content::ShareLink;
+pub use live::{LiveLink, LivePacket, LiveReceiver, LiveStream, MediaKind};
 pub use room::{Room, RoomEvent, RoomKey, RoomKeyParseError, Subscription};
 
 use std::path::{Path, PathBuf};
@@ -21,8 +23,9 @@ use tokio::sync::OnceCell;
 
 /// A running Peersey node.
 ///
-/// Create one node per application. Content networking and storage start lazily
-/// on the first file operation, so room-only applications stay lightweight.
+/// Create one node per application. Content and live networking start lazily
+/// on the first file or live operation, so room-only applications stay
+/// lightweight.
 pub struct Peersey {
     content: OnceCell<ContentNode>,
     storage: Option<PathBuf>,
@@ -90,6 +93,19 @@ impl Peersey {
             .await
     }
 
+    /// Create a private live stream and a link for viewers.
+    ///
+    /// The returned publisher accepts encoded audio/video chunks and arbitrary
+    /// realtime data. Packets sent before a viewer connects are not retained.
+    pub async fn create_live_stream(&self) -> Result<(LiveStream, LiveLink), Error> {
+        Ok(self.content().await?.create_live_stream().await)
+    }
+
+    /// Connect to a live stream using its capability link.
+    pub async fn watch_live(&self, link: &LiveLink) -> Result<LiveReceiver, Error> {
+        self.content().await?.watch_live(link).await
+    }
+
     /// Stop file serving and close the content endpoint.
     ///
     /// Rooms have independent lifetimes and should be shut down separately.
@@ -135,6 +151,23 @@ pub enum Error {
     /// Public room name was empty or too long.
     #[error("room name must be 1-128 bytes")]
     InvalidRoomName,
+    /// A live stream link could not be parsed.
+    #[error("invalid live stream link")]
+    InvalidLiveLink,
+    /// The publisher rejected the live stream capability.
+    #[error("live stream access denied")]
+    LiveAccessDenied,
+    /// A malformed packet was received from a live stream.
+    #[error("invalid live stream packet")]
+    InvalidLivePacket,
+    /// A live packet exceeded the bounded packet size.
+    #[error("live packet is {size} bytes; maximum is {max}")]
+    LivePacketTooLarge {
+        /// Actual packet size.
+        size: usize,
+        /// Maximum accepted packet size.
+        max: usize,
+    },
     /// Room discovery or gossip failed.
     #[error(transparent)]
     Rendezvous(#[from] iroh_gossip_rendezvous::Error),

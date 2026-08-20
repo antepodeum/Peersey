@@ -11,7 +11,10 @@ use iroh_blobs::{
     BlobsProtocol, api::downloader::Downloader, store::fs::FsStore, ticket::BlobTicket,
 };
 
-use crate::Error;
+use crate::{
+    Error,
+    live::{LiveHost, LiveLink, LiveReceiver, LiveStream},
+};
 
 /// Portable link containing a content hash and provider address.
 #[derive(Clone, PartialEq, Eq)]
@@ -50,6 +53,7 @@ pub(crate) struct ContentNode {
     store: FsStore,
     downloader: Downloader,
     addresses: MemoryLookup,
+    live: LiveHost,
     _temporary: Option<tempfile::TempDir>,
 }
 
@@ -77,8 +81,10 @@ impl ContentNode {
         }
         let endpoint = endpoint.bind().await.map_err(Error::p2p)?;
         let blobs = BlobsProtocol::new(&store, None);
+        let live = LiveHost::default();
         let router = Router::builder(endpoint)
             .accept(iroh_blobs::ALPN, blobs)
+            .accept(crate::live::ALPN, live.clone())
             .spawn();
         let downloader = store.downloader(router.endpoint());
         Ok(Self {
@@ -86,6 +92,7 @@ impl ContentNode {
             store,
             downloader,
             addresses,
+            live,
             _temporary: temporary,
         })
     }
@@ -123,6 +130,20 @@ impl ContentNode {
             .export(link.0.hash(), destination)
             .await
             .map_err(Error::p2p)
+    }
+
+    pub(crate) async fn create_live_stream(&self) -> (LiveStream, LiveLink) {
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(iroh::NET_REPORT_TIMEOUT),
+            self.router.endpoint().online(),
+        )
+        .await;
+        self.live.create(self.router.endpoint().addr())
+    }
+
+    pub(crate) async fn watch_live(&self, link: &LiveLink) -> Result<LiveReceiver, Error> {
+        self.addresses.add_endpoint_info(link.endpoint().clone());
+        self.live.connect(self.router.endpoint(), link).await
     }
 
     pub(crate) async fn shutdown(&self) -> Result<(), Error> {
