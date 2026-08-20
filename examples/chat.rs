@@ -1,19 +1,23 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use peersey::{Peersey, RoomEvent, RoomKey};
+use rustyline::{DefaultEditor, ExternalPrinter, error::ReadlineError};
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncBufReadExt, BufReader};
+use std::io::{IsTerminal, Write};
+use tokio::sync::mpsc;
+
+const MAX_NAME_CHARS: usize = 32;
+const MAX_MESSAGE_CHARS: usize = 4_096;
 
 #[derive(Debug, Parser)]
 #[command(name = "peersey-chat")]
 #[command(about = "Zero-config P2P chat over Peersey")]
 struct Args {
-    /// Your display name.
-    #[arg(short, long)]
+    /// Your display name (1-32 characters).
+    #[arg(value_parser = parse_name)]
     name: String,
 
-    /// Secret room key. Omit it to create a new private room.
-    #[arg(short, long)]
+    /// Secret room key. Omit to create a new private room.
     room: Option<RoomKey>,
 }
 
@@ -23,69 +27,322 @@ struct ChatMessage {
     text: String,
 }
 
+enum Input {
+    Line(String),
+    Quit,
+    Error(String),
+}
+
+enum Command<'a> {
+    Message(&'a str),
+    Help,
+    Room,
+    Clear,
+    Quit,
+    Unknown(&'a str),
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
     let node = Peersey::new();
+    let created = args.room.is_none();
     let (room, room_key) = match args.room {
         Some(key) => (node.join_private_room(key).await.context("join room")?, key),
         None => node.create_private_room().await.context("create room")?,
     };
 
-    println!("Peersey private chat");
-    println!("room key: {room_key}");
-    if args.room.is_none() {
-        println!("share that secret key with invited peers");
-    }
+    let color = std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none();
+    print_header(
+        &args.name,
+        &room_key,
+        &room.peer_id().to_string(),
+        created,
+        color,
+    );
 
-    println!("peer: {}", room.peer_id());
-    println!("ready; type a message and press Enter");
+    let mut editor = DefaultEditor::new().context("initialize terminal editor")?;
+    let mut printer: Box<dyn ExternalPrinter> = match editor.create_external_printer() {
+        Ok(printer) => Box::new(printer),
+        Err(_) => Box::new(PlainPrinter),
+    };
+    let (input_tx, mut input_rx) = mpsc::channel(16);
+    let input_task = tokio::task::spawn_blocking(move || {
+        loop {
+            match editor.readline("› ") {
+                Ok(line) => {
+                    if !line.trim().is_empty() {
+                        let _ = editor.add_history_entry(line.as_str());
+                    }
+                    if matches!(line.trim(), "/quit" | "/exit") {
+                        let _ = input_tx.blocking_send(Input::Quit);
+                        break;
+                    }
+                    if input_tx.blocking_send(Input::Line(line)).is_err() {
+                        break;
+                    }
+                }
+                Err(ReadlineError::Interrupted | ReadlineError::Eof) => {
+                    let _ = input_tx.blocking_send(Input::Quit);
+                    break;
+                }
+                Err(error) => {
+                    let _ = input_tx.blocking_send(Input::Error(error.to_string()));
+                    break;
+                }
+            }
+        }
+    });
 
     let mut events = room.subscribe();
-    let stdin = BufReader::new(tokio::io::stdin());
-    let mut lines = stdin.lines();
 
     loop {
         tokio::select! {
-            line = lines.next_line() => {
-                let Some(text) = line.context("read stdin")? else {
-                    break;
-                };
-                if text.trim().is_empty() {
-                    continue;
+            input = input_rx.recv() => {
+                match input {
+                    Some(Input::Line(line)) => match parse_command(&line) {
+                        Command::Message(text) => {
+                            if text.is_empty() {
+                                continue;
+                            }
+                            if text.chars().count() > MAX_MESSAGE_CHARS {
+                                print_notice(printer.as_mut(), "message too long (max 4096 characters)", color);
+                                continue;
+                            }
+                            let message = ChatMessage {
+                                name: args.name.clone(),
+                                text: text.to_owned(),
+                            };
+                            let payload = postcard::to_stdvec(&message).context("encode chat message")?;
+                            room.send(payload).await.context("send chat message")?;
+                            print_message(printer.as_mut(), &args.name, text, true, color);
+                        }
+                        Command::Help => print_help(printer.as_mut(), color),
+                        Command::Room => print_room_key(printer.as_mut(), &room_key, color),
+                        Command::Clear => clear_screen(printer.as_mut()),
+                        Command::Quit => break,
+                        Command::Unknown(command) => {
+                            print_notice(printer.as_mut(), &format!("unknown command: {command} · try /help"), color);
+                        }
+                    },
+                    Some(Input::Quit) | None => break,
+                    Some(Input::Error(error)) => {
+                        print_notice(printer.as_mut(), &format!("input error: {error}"), color);
+                        break;
+                    }
                 }
-
-                let message = ChatMessage {
-                    name: args.name.clone(),
-                    text: text.clone(),
-                };
-                let payload = postcard::to_stdvec(&message).context("encode chat message")?;
-                room.send(payload).await.context("send chat message")?;
-                println!("{}: {}", args.name, text);
             }
             event = events.recv() => {
                 match event {
                     Some(RoomEvent::Message { content }) => {
                         match postcard::from_bytes::<ChatMessage>(&content) {
-                            Ok(message) => println!("{}: {}", message.name, message.text),
-                            Err(error) => eprintln!("ignored invalid chat message: {error}"),
+                            Ok(message) => print_message(printer.as_mut(), &message.name, &message.text, false, color),
+                            Err(_) => print_notice(printer.as_mut(), "ignored invalid message", color),
                         }
                     }
-                    Some(RoomEvent::PeerJoined { peer }) => println!("[peer joined: {peer}]"),
-                    Some(RoomEvent::PeerLeft { peer }) => println!("[peer left: {peer}]"),
-                    Some(RoomEvent::Lagged) => {
-                        eprintln!("[lagged; some events were skipped]");
-                    }
+                    Some(RoomEvent::PeerJoined { peer }) => print_presence(printer.as_mut(), "joined", &peer.to_string(), color),
+                    Some(RoomEvent::PeerLeft { peer }) => print_presence(printer.as_mut(), "left", &peer.to_string(), color),
+                    Some(RoomEvent::Lagged) => print_notice(printer.as_mut(), "some messages were skipped", color),
                     None => break,
                 }
-            }
-            _ = tokio::signal::ctrl_c() => {
-                break;
             }
         }
     }
 
+    print_line(printer.as_mut(), dim("leaving private room…", color));
     room.shutdown().await;
     node.shutdown().await.context("shutdown Peersey")?;
+    input_task.await.context("join terminal input task")?;
     Ok(())
+}
+
+fn parse_name(value: &str) -> std::result::Result<String, String> {
+    let value = value.trim();
+    let length = value.chars().count();
+    if length == 0 || length > MAX_NAME_CHARS {
+        return Err(format!("name must be 1-{MAX_NAME_CHARS} characters"));
+    }
+    if value.chars().any(char::is_control) {
+        return Err("name cannot contain control characters".to_owned());
+    }
+    Ok(value.to_owned())
+}
+
+fn parse_command(line: &str) -> Command<'_> {
+    let text = line.trim();
+    if text.is_empty() {
+        return Command::Message("");
+    }
+    if text.starts_with("//") {
+        return Command::Message(&text[1..]);
+    }
+    match text {
+        "/help" => Command::Help,
+        "/room" => Command::Room,
+        "/clear" => Command::Clear,
+        "/quit" | "/exit" => Command::Quit,
+        command if command.starts_with('/') => Command::Unknown(command),
+        message => Command::Message(message),
+    }
+}
+
+fn print_header(name: &str, key: &RoomKey, peer: &str, created: bool, color: bool) {
+    println!("{}", bold("peersey · private room", color));
+    if created {
+        println!(
+            "{}",
+            dim("new room · share invite only with people you trust", color)
+        );
+        println!("invite  {key}");
+    } else {
+        println!("{}", dim("joined with private invite", color));
+    }
+    println!("you     {} · {}", clean_terminal_text(name), short_id(peer));
+    println!(
+        "{}",
+        dim(
+            "Enter send · ↑ history · /help commands · Ctrl+C leave",
+            color
+        )
+    );
+    println!();
+}
+
+fn print_message(
+    printer: &mut dyn ExternalPrinter,
+    name: &str,
+    text: &str,
+    own: bool,
+    color: bool,
+) {
+    let name = clean_terminal_text(name);
+    let text = clean_terminal_text(text);
+    let label = if own {
+        format!("{} {}", accent("you", color), bold(&name, color))
+    } else {
+        bold(&name, color)
+    };
+    print_line(printer, format!("{label}  {text}"));
+}
+
+fn print_presence(printer: &mut dyn ExternalPrinter, action: &str, peer: &str, color: bool) {
+    print_line(
+        printer,
+        dim(&format!("· peer {} {action}", short_id(peer)), color),
+    );
+}
+
+fn print_notice(printer: &mut dyn ExternalPrinter, text: &str, color: bool) {
+    print_line(
+        printer,
+        format!("{} {}", accent("!", color), clean_terminal_text(text)),
+    );
+}
+
+fn print_help(printer: &mut dyn ExternalPrinter, color: bool) {
+    print_line(
+        printer,
+        format!(
+            "{}\n  /room   show private invite\n  /clear  clear screen\n  /quit   leave room\n  //text  send message starting with /",
+            bold("commands", color)
+        ),
+    );
+}
+
+fn print_room_key(printer: &mut dyn ExternalPrinter, key: &RoomKey, color: bool) {
+    print_line(
+        printer,
+        format!(
+            "{}\n{key}\n{}",
+            bold("private invite", color),
+            dim("Anyone with this key can join. Share it carefully.", color)
+        ),
+    );
+}
+
+fn clear_screen(printer: &mut dyn ExternalPrinter) {
+    let _ = printer.print("\x1b[2J\x1b[H".to_owned());
+}
+
+fn print_line(printer: &mut dyn ExternalPrinter, value: String) {
+    let _ = printer.print(format!("{value}\n"));
+}
+
+struct PlainPrinter;
+
+impl ExternalPrinter for PlainPrinter {
+    fn print(&mut self, message: String) -> rustyline::Result<()> {
+        let mut stdout = std::io::stdout().lock();
+        stdout.write_all(message.as_bytes())?;
+        stdout.flush()?;
+        Ok(())
+    }
+}
+
+fn clean_terminal_text(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| {
+            if character == '\t' {
+                ' '
+            } else if character.is_control() {
+                '�'
+            } else {
+                character
+            }
+        })
+        .take(MAX_MESSAGE_CHARS)
+        .collect()
+}
+
+fn short_id(value: &str) -> &str {
+    value.get(..8).unwrap_or(value)
+}
+
+fn bold(value: &str, enabled: bool) -> String {
+    style("1", value, enabled)
+}
+
+fn dim(value: &str, enabled: bool) -> String {
+    style("2", value, enabled)
+}
+
+fn accent(value: &str, enabled: bool) -> String {
+    style("36", value, enabled)
+}
+
+fn style(code: &str, value: &str, enabled: bool) -> String {
+    if enabled {
+        format!("\x1b[{code}m{value}\x1b[0m")
+    } else {
+        value.to_owned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn names_are_trimmed_and_validated() {
+        assert_eq!(parse_name("  alice  ").unwrap(), "alice");
+        assert!(parse_name(" ").is_err());
+        assert!(parse_name(&"x".repeat(MAX_NAME_CHARS + 1)).is_err());
+        assert!(parse_name("bad\nname").is_err());
+    }
+
+    #[test]
+    fn commands_are_recognized() {
+        assert!(matches!(parse_command("/help"), Command::Help));
+        assert!(matches!(parse_command("/exit"), Command::Quit));
+        assert!(matches!(parse_command("/wat"), Command::Unknown("/wat")));
+        assert!(matches!(parse_command("//help"), Command::Message("/help")));
+        assert!(matches!(parse_command("hello"), Command::Message("hello")));
+    }
+
+    #[test]
+    fn terminal_controls_are_removed() {
+        assert_eq!(clean_terminal_text("hello\x1b[31m"), "hello�[31m");
+        assert_eq!(clean_terminal_text("a\tb"), "a b");
+    }
 }
