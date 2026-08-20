@@ -3,6 +3,7 @@ use clap::Parser;
 use peersey::{Peersey, RoomEvent, RoomKey};
 use rustyline::{DefaultEditor, ExternalPrinter, error::ReadlineError};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::io::{IsTerminal, Write};
 use tokio::sync::mpsc;
 
@@ -66,10 +67,11 @@ async fn main() -> Result<()> {
         Ok(printer) => Box::new(printer),
         Err(_) => Box::new(PlainPrinter),
     };
+    let prompt = chat_prompt(&args.name, color);
     let (input_tx, mut input_rx) = mpsc::channel(16);
     let input_task = tokio::task::spawn_blocking(move || {
         loop {
-            match editor.readline("› ") {
+            match editor.readline(&prompt) {
                 Ok(line) => {
                     if !line.trim().is_empty() {
                         let _ = editor.add_history_entry(line.as_str());
@@ -95,6 +97,7 @@ async fn main() -> Result<()> {
     });
 
     let mut events = room.subscribe();
+    let mut connected_peers = HashSet::new();
 
     loop {
         tokio::select! {
@@ -103,6 +106,10 @@ async fn main() -> Result<()> {
                     Some(Input::Line(line)) => match parse_command(&line) {
                         Command::Message(text) => {
                             if text.is_empty() {
+                                continue;
+                            }
+                            if connected_peers.is_empty() {
+                                print_notice(printer.as_mut(), "not sent · waiting for another peer", color);
                                 continue;
                             }
                             if text.chars().count() > MAX_MESSAGE_CHARS {
@@ -115,7 +122,6 @@ async fn main() -> Result<()> {
                             };
                             let payload = postcard::to_stdvec(&message).context("encode chat message")?;
                             room.send(payload).await.context("send chat message")?;
-                            print_message(printer.as_mut(), &args.name, text, true, color);
                         }
                         Command::Help => print_help(printer.as_mut(), color),
                         Command::Room => print_room_key(printer.as_mut(), &room_key, color),
@@ -136,12 +142,21 @@ async fn main() -> Result<()> {
                 match event {
                     Some(RoomEvent::Message { content }) => {
                         match postcard::from_bytes::<ChatMessage>(&content) {
-                            Ok(message) => print_message(printer.as_mut(), &message.name, &message.text, false, color),
+                            Ok(message) => print_message(printer.as_mut(), &message.name, &message.text, color),
                             Err(_) => print_notice(printer.as_mut(), "ignored invalid message", color),
                         }
                     }
-                    Some(RoomEvent::PeerJoined { peer }) => print_presence(printer.as_mut(), "joined", &peer.to_string(), color),
-                    Some(RoomEvent::PeerLeft { peer }) => print_presence(printer.as_mut(), "left", &peer.to_string(), color),
+                    Some(RoomEvent::PeerJoined { peer }) => {
+                        let peer = peer.to_string();
+                        if connected_peers.insert(peer.clone()) {
+                            print_connected(printer.as_mut(), &peer, connected_peers.len(), color);
+                        }
+                    }
+                    Some(RoomEvent::PeerLeft { peer }) => {
+                        let peer = peer.to_string();
+                        connected_peers.remove(&peer);
+                        print_disconnected(printer.as_mut(), &peer, connected_peers.len(), color);
+                    }
                     Some(RoomEvent::Lagged) => print_notice(printer.as_mut(), "some messages were skipped", color),
                     None => break,
                 }
@@ -197,7 +212,12 @@ fn print_header(name: &str, key: &RoomKey, peer: &str, created: bool, color: boo
     } else {
         println!("{}", dim("joined with private invite", color));
     }
-    println!("you     {} · {}", clean_terminal_text(name), short_id(peer));
+    println!(
+        "you     {} · {}",
+        accent(&clean_name(name), color),
+        short_id(peer)
+    );
+    println!("status  {}", accent("waiting for another peer…", color));
     println!(
         "{}",
         dim(
@@ -208,28 +228,62 @@ fn print_header(name: &str, key: &RoomKey, peer: &str, created: bool, color: boo
     println!();
 }
 
-fn print_message(
-    printer: &mut dyn ExternalPrinter,
-    name: &str,
-    text: &str,
-    own: bool,
-    color: bool,
-) {
-    let name = clean_terminal_text(name);
+fn print_message(printer: &mut dyn ExternalPrinter, name: &str, text: &str, color: bool) {
+    let name = clean_name(name);
     let text = clean_terminal_text(text);
-    let label = if own {
-        format!("{} {}", accent("you", color), bold(&name, color))
-    } else {
-        bold(&name, color)
-    };
+    let label = user_color(&name, color);
     print_line(printer, format!("{label}  {text}"));
 }
 
-fn print_presence(printer: &mut dyn ExternalPrinter, action: &str, peer: &str, color: bool) {
+fn print_connected(printer: &mut dyn ExternalPrinter, peer: &str, count: usize, color: bool) {
     print_line(
         printer,
-        dim(&format!("· peer {} {action}", short_id(peer)), color),
+        format!(
+            "{} {}",
+            accent("● connected", color),
+            dim(
+                &format!(
+                    "· {} joined · {count} {} online",
+                    short_id(peer),
+                    peer_word(count)
+                ),
+                color
+            )
+        ),
     );
+}
+
+fn print_disconnected(
+    printer: &mut dyn ExternalPrinter,
+    peer: &str,
+    remaining: usize,
+    color: bool,
+) {
+    if remaining == 0 {
+        print_line(
+            printer,
+            format!(
+                "{} {}",
+                accent("○ waiting", color),
+                dim(
+                    &format!("· {} left · no peers connected", short_id(peer)),
+                    color
+                )
+            ),
+        );
+    } else {
+        print_line(
+            printer,
+            dim(
+                &format!(
+                    "· {} left · {remaining} {} online",
+                    short_id(peer),
+                    peer_word(remaining)
+                ),
+                color,
+            ),
+        );
+    }
 }
 
 fn print_notice(printer: &mut dyn ExternalPrinter, text: &str, color: bool) {
@@ -295,8 +349,38 @@ fn clean_terminal_text(value: &str) -> String {
         .collect()
 }
 
+fn clean_name(value: &str) -> String {
+    clean_terminal_text(value)
+        .chars()
+        .take(MAX_NAME_CHARS)
+        .collect()
+}
+
+fn chat_prompt(name: &str, color: bool) -> String {
+    format!("{} › ", accent(&clean_name(name), color))
+}
+
+fn user_color(name: &str, enabled: bool) -> String {
+    style(user_color_code(name), name, enabled)
+}
+
+fn user_color_code(name: &str) -> &'static str {
+    const COLORS: [&str; 10] = ["32", "33", "35", "36", "91", "92", "93", "94", "95", "96"];
+    let hash = name
+        .as_bytes()
+        .iter()
+        .fold(0xcbf29ce484222325_u64, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+        });
+    COLORS[hash as usize % COLORS.len()]
+}
+
 fn short_id(value: &str) -> &str {
     value.get(..8).unwrap_or(value)
+}
+
+fn peer_word(count: usize) -> &'static str {
+    if count == 1 { "peer" } else { "peers" }
 }
 
 fn bold(value: &str, enabled: bool) -> String {
@@ -344,5 +428,12 @@ mod tests {
     fn terminal_controls_are_removed() {
         assert_eq!(clean_terminal_text("hello\x1b[31m"), "hello�[31m");
         assert_eq!(clean_terminal_text("a\tb"), "a b");
+    }
+
+    #[test]
+    fn user_colors_are_stable() {
+        assert_eq!(user_color_code("alice"), user_color_code("alice"));
+        assert!(user_color_code("alice").parse::<u8>().is_ok());
+        assert_eq!(chat_prompt("alice", false), "alice › ");
     }
 }
