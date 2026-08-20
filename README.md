@@ -3,14 +3,17 @@
 Batteries-included P2P messaging and content sharing for Rust.
 
 Peersey hides endpoint addresses, relays, hole punching, protocol routing,
-Mainline DHT records, blob stores, and transfer verification behind a small API.
+Mainline DHT records, blob stores, transfer verification, and live connection
+authentication behind a small API.
 
 ```text
 Peersey
 ├── public rooms: name -> DHT discovery -> iroh-gossip
 ├── private rooms: RoomKey -> secret-key rendezvous -> iroh-gossip
-└── content-addressed files
-    └── ShareLink -> iroh-blobs -> verified download
+├── content-addressed files
+│   └── ShareLink -> iroh-blobs -> verified download
+└── live streams
+    └── LiveLink -> independent QUIC streams -> audio/video/data packets
 ```
 
 ## Install
@@ -144,6 +147,57 @@ and networking start only when first used. `new()` uses an automatically
 deleted temporary disk store. `persistent(path)` preserves content and provider
 identity across restarts, keeping links valid when the node comes back online.
 
+## Live audio, video, and realtime data
+
+Create a live stream and share its capability link:
+
+```rust
+use peersey::Peersey;
+
+# async fn example() -> Result<(), peersey::Error> {
+let node = Peersey::new();
+let (stream, link) = node.create_live_stream().await?;
+println!("watch at: {link}");
+
+// Pass complete encoded frames or chunks from your media pipeline.
+stream.send_video("encoded H.264 frame")?;
+stream.send_audio("encoded Opus packet")?;
+stream.send_data("cursor position")?;
+# Ok(())
+# }
+```
+
+Watch from another process or machine:
+
+```rust
+use peersey::{MediaKind, Peersey};
+
+# async fn example(text: &str) -> Result<(), Box<dyn std::error::Error>> {
+let node = Peersey::new();
+let link = text.parse()?;
+let mut live = node.watch_live(&link).await?;
+
+while let Some(packet) = live.recv().await? {
+    match packet.kind {
+        MediaKind::Video => { /* decode and render packet.content */ }
+        MediaKind::Audio => { /* decode and play packet.content */ }
+        MediaKind::Data => { /* handle realtime application data */ }
+    }
+}
+# Ok(())
+# }
+```
+
+Packets use separate QUIC streams, so delayed video does not block audio or
+realtime data. Packets may arrive out of order; timestamps allow playback
+synchronization. Streams retain no history, and slow viewers skip old packets
+instead of accumulating unlimited latency. Each packet is limited to 8 MiB.
+
+Peersey currently transports media but does not capture cameras, choose
+codecs, decode, render, provide a jitter buffer, or adapt bitrate. This keeps
+the core portable while `iroh-live` remains an early preview incompatible with
+the Iroh version required by DHT rendezvous.
+
 ## Security model
 
 - Public room names are safe to log. Anyone knowing a name can join.
@@ -152,15 +206,18 @@ identity across restarts, keeping links valid when the node comes back online.
 - Room traffic uses Iroh's authenticated encrypted QUIC connections.
 - `ShareLink` is not secret or access-controlled. Anyone holding it can request
   the content while its provider is online.
+- `LiveLink` is a secret capability. Anyone holding it can watch the live
+  stream while its publisher is online. Its `Debug` output is redacted.
 - Peersey 0.2 does not yet provide member roles, revocation, key rotation, or
   content encryption.
 
 ## Scope
 
-Peersey 0.2 intentionally exposes only:
+Peersey 0.2 intentionally exposes only high-level handles:
 
 ```text
 Peersey   Room   RoomKey   RoomEvent   ShareLink
+LiveStream   LiveLink   LiveReceiver   LivePacket   MediaKind
 ```
 
 Current share links name one provider. Multi-provider discovery, automatic
