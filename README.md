@@ -7,8 +7,8 @@ Mainline DHT records, blob stores, and transfer verification behind a small API.
 
 ```text
 Peersey
-├── private pub/sub rooms
-│   └── RoomKey -> DHT discovery -> iroh-gossip
+├── public rooms: RoomId -> DHT discovery -> iroh-gossip
+├── private rooms: RoomKey -> private DHT rendezvous -> iroh-gossip
 └── content-addressed files
     └── ShareLink -> iroh-blobs -> verified download
 ```
@@ -21,6 +21,35 @@ peersey = "0.2"
 tokio = { version = "1", features = ["full"] }
 ```
 
+## Public pub/sub
+
+Join a named open room. No secret or peer address required:
+
+```rust
+use peersey::{Peersey, RoomId};
+
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
+let node = Peersey::start().await?;
+let id: RoomId = "community/rust:general".parse()?;
+let room = node.join_public_room(id).await?;
+room.send("hello everyone").await?;
+# Ok(())
+# }
+```
+
+Create an unlisted open room with a random public ID:
+
+```rust
+# async fn example(node: &peersey::Peersey) -> Result<(), peersey::Error> {
+let (room, id) = node.create_public_room().await?;
+println!("public room: {id}");
+# Ok(())
+# }
+```
+
+Anyone knowing `RoomId` can join. Peersey does not yet provide a global room
+directory, so “public” means open membership, not globally searchable.
+
 ## Private pub/sub
 
 Create a room:
@@ -30,7 +59,7 @@ use peersey::{Peersey, RoomEvent};
 
 # async fn example() -> Result<(), peersey::Error> {
 let node = Peersey::start().await?;
-let (room, key) = node.create_room().await?;
+let (room, key) = node.create_private_room().await?;
 println!("invite key: {key}");
 
 let mut events = room.subscribe();
@@ -53,7 +82,7 @@ use peersey::{Peersey, RoomKey};
 # async fn example(invite: &str) -> Result<(), Box<dyn std::error::Error>> {
 let node = Peersey::start().await?;
 let key: RoomKey = invite.parse()?;
-let room = node.join_room(key).await?;
+let room = node.join_private_room(key).await?;
 room.send("joined").await?;
 # Ok(())
 # }
@@ -101,6 +130,7 @@ valid when the node comes back online.
 
 ## Security model
 
+- `RoomId` is public and safe to log. Anyone knowing it can join.
 - `RoomKey` is a secret capability. Anyone with it can discover and join the
   room. Its `Debug` output is redacted.
 - Room traffic uses Iroh's authenticated encrypted QUIC connections.
@@ -114,7 +144,7 @@ valid when the node comes back online.
 Peersey 0.2 intentionally exposes only:
 
 ```text
-Peersey   Room   RoomKey   RoomEvent   ShareLink
+Peersey   Room   RoomId   RoomKey   RoomEvent   ShareLink
 ```
 
 Current share links name one provider. Multi-provider discovery, automatic
