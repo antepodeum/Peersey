@@ -77,6 +77,14 @@ pub enum Error {
     /// Local filesystem operation failed.
     #[error(transparent)]
     Io(#[from] std::io::Error),
+    /// Stored endpoint identity has an invalid length.
+    #[error("identity file {path:?} must contain 32 bytes, got {length}")]
+    InvalidIdentity {
+        /// Identity file path.
+        path: std::path::PathBuf,
+        /// Actual byte length.
+        length: usize,
+    },
     /// Private-room discovery or gossip failed.
     #[error(transparent)]
     Rendezvous(#[from] iroh_gossip_rendezvous::Error),

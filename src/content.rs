@@ -5,7 +5,7 @@ use std::{
 };
 
 use iroh::{
-    Endpoint,
+    Endpoint, SecretKey,
     endpoint::presets,
     protocol::{Router, RouterBuilder},
 };
@@ -54,16 +54,25 @@ pub(crate) struct ContentNode {
 impl ContentNode {
     pub(crate) async fn temporary() -> Result<Self, Error> {
         let directory = tempfile::tempdir()?;
-        Self::open(directory.path().to_owned(), Some(directory)).await
+        Self::open(directory.path().to_owned(), Some(directory), None).await
     }
 
     pub(crate) async fn persistent(path: &Path) -> Result<Self, Error> {
-        Self::open(path.to_owned(), None).await
+        let identity = load_or_create_identity(path)?;
+        Self::open(path.to_owned(), None, Some(identity)).await
     }
 
-    async fn open(path: PathBuf, temporary: Option<tempfile::TempDir>) -> Result<Self, Error> {
+    async fn open(
+        path: PathBuf,
+        temporary: Option<tempfile::TempDir>,
+        identity: Option<SecretKey>,
+    ) -> Result<Self, Error> {
         let store = FsStore::load(path).await.map_err(Error::p2p)?;
-        let endpoint = Endpoint::bind(presets::N0).await.map_err(Error::p2p)?;
+        let mut endpoint = Endpoint::builder(presets::N0);
+        if let Some(identity) = identity {
+            endpoint = endpoint.secret_key(identity);
+        }
+        let endpoint = endpoint.bind().await.map_err(Error::p2p)?;
         let blobs = BlobsProtocol::new(&store, None);
         let router = RouterBuilder::new(endpoint)
             .accept(iroh_blobs::ALPN, blobs)
@@ -107,5 +116,82 @@ impl ContentNode {
 
     pub(crate) async fn shutdown(&self) -> Result<(), Error> {
         self.router.shutdown().await.map_err(Error::p2p)
+    }
+}
+
+fn load_or_create_identity(root: &Path) -> Result<SecretKey, Error> {
+    const KEY_LEN: usize = 32;
+
+    std::fs::create_dir_all(root)?;
+    let path = root.join("identity.key");
+    match std::fs::read(&path) {
+        Ok(bytes) => {
+            let bytes: [u8; KEY_LEN] =
+                bytes
+                    .try_into()
+                    .map_err(|bytes: Vec<u8>| Error::InvalidIdentity {
+                        path,
+                        length: bytes.len(),
+                    })?;
+            Ok(SecretKey::from_bytes(&bytes))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let key = SecretKey::generate();
+            write_new_identity(&path, &key.to_bytes())?;
+            let bytes = std::fs::read(&path)?;
+            let bytes: [u8; KEY_LEN] =
+                bytes
+                    .try_into()
+                    .map_err(|bytes: Vec<u8>| Error::InvalidIdentity {
+                        path,
+                        length: bytes.len(),
+                    })?;
+            Ok(SecretKey::from_bytes(&bytes))
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn write_new_identity(path: &Path, bytes: &[u8; 32]) -> Result<(), Error> {
+    use std::io::Write;
+
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    match options.open(path) {
+        Ok(mut file) => {
+            file.write_all(bytes)?;
+            file.sync_all()?;
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn persistent_identity_is_stable() {
+        let directory = tempfile::tempdir().unwrap();
+        let first = load_or_create_identity(directory.path()).unwrap();
+        let second = load_or_create_identity(directory.path()).unwrap();
+        assert_eq!(first.public(), second.public());
+    }
+
+    #[test]
+    fn malformed_identity_is_rejected() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("identity.key"), [0; 3]).unwrap();
+        assert!(matches!(
+            load_or_create_identity(directory.path()).unwrap_err(),
+            Error::InvalidIdentity { length: 3, .. }
+        ));
     }
 }
