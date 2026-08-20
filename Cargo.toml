@@ -1,21 +1,23 @@
 [package]
 name = "peersey"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.93"
-description = "Zero-config peer discovery for iroh-gossip topics"
+description = "Batteries-included P2P messaging and content sharing"
 license = "MIT OR Apache-2.0"
-keywords = ["iroh", "gossip", "p2p", "pubsub", "dht"]
+keywords = ["iroh", "p2p", "pubsub", "file-sharing", "dht"]
 categories = ["network-programming"]
 
 [dependencies]
 bytes = "1"
 hex = "0.4"
 iroh = "=1.0.0-rc.0"
+iroh-blobs = "=0.101.0"
 iroh-gossip = "0.99"
 iroh-gossip-rendezvous = "0.2.1"
 rand = "0.9"
 thiserror = "2"
+tempfile = "3"
 tokio = { version = "1", features = ["sync"] }
 
 [dev-dependencies]

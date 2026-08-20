@@ -1,8 +1,6 @@
-use std::time::Duration;
-
 use anyhow::{Context, Result};
 use clap::Parser;
-use peersey::{Event, Peersey, TopicKey};
+use peersey::{Peersey, RoomEvent, RoomKey};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, BufReader};
 
@@ -14,9 +12,9 @@ struct Args {
     #[arg(short, long)]
     name: String,
 
-    /// 64-hex-character topic key. Omit it to create a new room.
+    /// Secret room key. Omit it to create a new private room.
     #[arg(short, long)]
-    topic: Option<TopicKey>,
+    room: Option<RoomKey>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -28,21 +26,17 @@ struct ChatMessage {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
-    let topic = args.topic.unwrap_or_else(TopicKey::random);
+    let node = Peersey::start().await.context("start Peersey")?;
+    let (room, room_key) = match args.room {
+        Some(key) => (node.join_room(key).await.context("join room")?, key),
+        None => node.create_room().await.context("create room")?,
+    };
 
-    println!("Peersey chat");
-    println!("topic: {topic}");
-    if args.topic.is_none() {
-        println!("share only that topic key with the other peer");
+    println!("Peersey private chat");
+    println!("room key: {room_key}");
+    if args.room.is_none() {
+        println!("share that secret key with invited peers");
     }
-    println!("discovering peers through the Mainline DHT...");
-
-    let room = Peersey::builder(topic)
-        .namespace("peersey-chat/v1")
-        .wait_for_first_peer(Duration::from_secs(3))
-        .join()
-        .await
-        .context("join Peersey topic")?;
 
     println!("peer: {}", room.peer_id());
     println!("ready; type a message and press Enter");
@@ -66,20 +60,20 @@ async fn main() -> Result<()> {
                     text: text.clone(),
                 };
                 let payload = postcard::to_stdvec(&message).context("encode chat message")?;
-                room.publish(payload).await.context("publish chat message")?;
+                room.send(payload).await.context("send chat message")?;
                 println!("{}: {}", args.name, text);
             }
             event = events.recv() => {
                 match event {
-                    Ok(Event::Message { content }) => {
+                    Ok(RoomEvent::Message { content }) => {
                         match postcard::from_bytes::<ChatMessage>(&content) {
                             Ok(message) => println!("{}: {}", message.name, message.text),
                             Err(error) => eprintln!("ignored invalid chat message: {error}"),
                         }
                     }
-                    Ok(Event::PeerUp { peer }) => println!("[peer joined: {peer}]"),
-                    Ok(Event::PeerDown { peer }) => println!("[peer left: {peer}]"),
-                    Ok(Event::Lagged) => {
+                    Ok(RoomEvent::PeerJoined { peer }) => println!("[peer joined: {peer}]"),
+                    Ok(RoomEvent::PeerLeft { peer }) => println!("[peer left: {peer}]"),
+                    Ok(RoomEvent::Lagged) => {
                         eprintln!("[iroh-gossip lagged; some gossip events were skipped]");
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
@@ -95,5 +89,6 @@ async fn main() -> Result<()> {
     }
 
     room.shutdown().await;
+    node.shutdown().await.context("shutdown Peersey")?;
     Ok(())
 }
