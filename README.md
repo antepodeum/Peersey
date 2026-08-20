@@ -240,9 +240,10 @@ cargo run --example chat -- bob <private-invite-key>
 ```
 
 The prompt supports line editing and history. Incoming messages redraw safely
-without destroying text being entered. Use `/help` for commands, `/room` to
-show the invite again, `/clear` to clear the terminal, and `/quit`, Ctrl+C, or
-Ctrl+D to leave cleanly.
+without destroying text being entered. Wait for the `connected` status before
+sending; messages are not stored for offline peers. Use `/help` for commands,
+`/room` to show the invite again, `/clear` to clear the terminal, and `/quit`,
+Ctrl+C, or Ctrl+D to leave cleanly.
 
 ## License
 
