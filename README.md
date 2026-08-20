@@ -8,7 +8,7 @@ Mainline DHT records, blob stores, and transfer verification behind a small API.
 ```text
 Peersey
 ├── public rooms: RoomId -> DHT discovery -> iroh-gossip
-├── private rooms: RoomKey -> private DHT rendezvous -> iroh-gossip
+├── private rooms: RoomKey -> secret-key rendezvous -> iroh-gossip
 └── content-addressed files
     └── ShareLink -> iroh-blobs -> verified download
 ```
@@ -89,6 +89,22 @@ room.send("joined").await?;
 
 No public `namespace` exists. Peersey keeps protocol domain separation fixed
 internally, so users cannot accidentally create incompatible rooms.
+
+## Discovery model
+
+Both public and private rooms use the public BitTorrent Mainline DHT. Peersey
+does not run a separate private DHT.
+
+- Public rooms deterministically derive rendezvous coordinates from the public
+  `RoomId`.
+- Private rooms derive their gossip topic, DHT slot keys, and DHT record
+  encryption keys from `RoomKey` plus Peersey's fixed internal protocol salt.
+- Peers with the same `RoomKey` derive the same coordinates and decrypt the
+  peer records. Other DHT participants only see encrypted rendezvous records.
+
+This protects rendezvous contents from passive DHT observers. It does not
+provide anonymity, hide all network activity, or protect a room after its
+`RoomKey` leaks.
 
 ## Host a file
 

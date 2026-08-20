@@ -93,6 +93,8 @@ fn validate_room_id(value: &str) -> Result<(), RoomIdParseError> {
 /// Secret 256-bit capability required to discover and join a private room.
 ///
 /// Treat this value like a password. Anyone who has it can join the room.
+/// Peersey derives rendezvous coordinates and DHT record encryption keys from
+/// it while still using the public BitTorrent Mainline DHT.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RoomKey([u8; 32]);
 

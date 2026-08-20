@@ -2,6 +2,10 @@
 //!
 //! [`Peersey`] owns the networking and storage. Applications only handle
 //! public room IDs, private room keys, and share links.
+//!
+//! Room discovery uses the public BitTorrent Mainline DHT. Private rooms derive
+//! their DHT coordinates and encrypted rendezvous records from a secret
+//! [`RoomKey`]; they do not use a separate private DHT network.
 
 mod content;
 mod room;
