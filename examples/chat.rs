@@ -3,8 +3,9 @@ use clap::Parser;
 use peersey::{Peersey, RoomEvent, RoomKey};
 use rustyline::{DefaultEditor, ExternalPrinter, error::ReadlineError};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::io::{IsTerminal, Write};
+use std::time::Instant;
 use tokio::sync::mpsc;
 
 const MAX_NAME_CHARS: usize = 32;
@@ -28,6 +29,16 @@ struct ChatMessage {
     text: String,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+enum ChatPacket {
+    Presence {
+        peer: String,
+        name: String,
+        online_for_ms: u64,
+    },
+    Message(ChatMessage),
+}
+
 enum Input {
     Line(String),
     Quit,
@@ -46,6 +57,7 @@ enum Command<'a> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+    let started = Instant::now();
     let node = Peersey::new();
     let created = args.room.is_none();
     let (room, room_key) = match args.room {
@@ -54,13 +66,8 @@ async fn main() -> Result<()> {
     };
 
     let color = std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none();
-    print_header(
-        &args.name,
-        &room_key,
-        &room.peer_id().to_string(),
-        created,
-        color,
-    );
+    let local_peer = room.peer_id().to_string();
+    print_header(&args.name, &room_key, &local_peer, created, color);
 
     let mut editor = DefaultEditor::new().context("initialize terminal editor")?;
     let mut printer: Box<dyn ExternalPrinter> = match editor.create_external_printer() {
@@ -97,7 +104,7 @@ async fn main() -> Result<()> {
     });
 
     let mut events = room.subscribe();
-    let mut connected_peers = HashSet::new();
+    let mut connected_peers: HashMap<String, Option<String>> = HashMap::new();
 
     loop {
         tokio::select! {
@@ -116,11 +123,11 @@ async fn main() -> Result<()> {
                                 print_notice(printer.as_mut(), "message too long (max 4096 characters)", color);
                                 continue;
                             }
-                            let message = ChatMessage {
+                            let packet = ChatPacket::Message(ChatMessage {
                                 name: args.name.clone(),
                                 text: text.to_owned(),
-                            };
-                            let payload = postcard::to_stdvec(&message).context("encode chat message")?;
+                            });
+                            let payload = postcard::to_stdvec(&packet).context("encode chat message")?;
                             room.send(payload).await.context("send chat message")?;
                         }
                         Command::Help => print_help(printer.as_mut(), color),
@@ -141,21 +148,56 @@ async fn main() -> Result<()> {
             event = events.recv() => {
                 match event {
                     Some(RoomEvent::Message { content }) => {
-                        match postcard::from_bytes::<ChatMessage>(&content) {
-                            Ok(message) => print_message(printer.as_mut(), &message.name, &message.text, color),
+                        match postcard::from_bytes::<ChatPacket>(&content) {
+                            Ok(ChatPacket::Message(message)) => {
+                                print_message(printer.as_mut(), &message.name, &message.text, color);
+                            }
+                            Ok(ChatPacket::Presence { peer, name, online_for_ms }) => {
+                                if peer == local_peer {
+                                    continue;
+                                }
+                                let name = clean_name(&name);
+                                let first_announcement = connected_peers
+                                    .entry(peer.clone())
+                                    .or_default()
+                                    .replace(name.clone())
+                                    .is_none();
+                                if first_announcement {
+                                    let arrived_later = online_for_ms < elapsed_ms(started);
+                                    print_connected(
+                                        printer.as_mut(),
+                                        &name,
+                                        &peer,
+                                        connected_peers.len(),
+                                        arrived_later,
+                                        color,
+                                    );
+                                }
+                            }
                             Err(_) => print_notice(printer.as_mut(), "ignored invalid message", color),
                         }
                     }
                     Some(RoomEvent::PeerJoined { peer }) => {
                         let peer = peer.to_string();
-                        if connected_peers.insert(peer.clone()) {
-                            print_connected(printer.as_mut(), &peer, connected_peers.len(), color);
-                        }
+                        connected_peers.entry(peer).or_default();
+                        let presence = ChatPacket::Presence {
+                            peer: local_peer.clone(),
+                            name: args.name.clone(),
+                            online_for_ms: elapsed_ms(started),
+                        };
+                        let payload = postcard::to_stdvec(&presence).context("encode presence")?;
+                        room.send(payload).await.context("announce presence")?;
                     }
                     Some(RoomEvent::PeerLeft { peer }) => {
                         let peer = peer.to_string();
-                        connected_peers.remove(&peer);
-                        print_disconnected(printer.as_mut(), &peer, connected_peers.len(), color);
+                        let name = connected_peers.remove(&peer).flatten();
+                        print_disconnected(
+                            printer.as_mut(),
+                            name.as_deref(),
+                            &peer,
+                            connected_peers.len(),
+                            color,
+                        );
                     }
                     Some(RoomEvent::Lagged) => print_notice(printer.as_mut(), "some messages were skipped", color),
                     None => break,
@@ -235,52 +277,59 @@ fn print_message(printer: &mut dyn ExternalPrinter, name: &str, text: &str, colo
     print_line(printer, format!("{label}  {text}"));
 }
 
-fn print_connected(printer: &mut dyn ExternalPrinter, peer: &str, count: usize, color: bool) {
+fn print_connected(
+    printer: &mut dyn ExternalPrinter,
+    name: &str,
+    peer: &str,
+    count: usize,
+    arrived_later: bool,
+    color: bool,
+) {
+    let identity = peer_identity(name, peer, color);
+    let status = if arrived_later {
+        format!("{identity} joined")
+    } else {
+        format!("connected to {identity}")
+    };
     print_line(
         printer,
         format!(
-            "{} {}",
-            accent("● connected", color),
-            dim(
-                &format!(
-                    "· {} joined · {count} {} online",
-                    short_id(peer),
-                    peer_word(count)
-                ),
-                color
-            )
+            "{} {} {}",
+            accent("●", color),
+            status,
+            dim(&format!("· {count} {} online", peer_word(count)), color)
         ),
     );
 }
 
 fn print_disconnected(
     printer: &mut dyn ExternalPrinter,
+    name: Option<&str>,
     peer: &str,
     remaining: usize,
     color: bool,
 ) {
+    let identity = name
+        .map(|name| peer_identity(name, peer, color))
+        .unwrap_or_else(|| dim(short_id(peer), color));
     if remaining == 0 {
         print_line(
             printer,
             format!(
-                "{} {}",
+                "{} · {identity} left {}",
                 accent("○ waiting", color),
-                dim(
-                    &format!("· {} left · no peers connected", short_id(peer)),
-                    color
-                )
+                dim("· no peers connected", color)
             ),
         );
     } else {
         print_line(
             printer,
-            dim(
-                &format!(
-                    "· {} left · {remaining} {} online",
-                    short_id(peer),
-                    peer_word(remaining)
-                ),
-                color,
+            format!(
+                "· {identity} left {}",
+                dim(
+                    &format!("· {remaining} {} online", peer_word(remaining)),
+                    color
+                )
             ),
         );
     }
@@ -364,6 +413,10 @@ fn user_color(name: &str, enabled: bool) -> String {
     style(user_color_code(name), name, enabled)
 }
 
+fn peer_identity(name: &str, peer: &str, color: bool) -> String {
+    format!("{} {}", user_color(name, color), dim(short_id(peer), color))
+}
+
 fn user_color_code(name: &str) -> &'static str {
     const COLORS: [&str; 10] = ["32", "33", "35", "36", "91", "92", "93", "94", "95", "96"];
     let hash = name
@@ -381,6 +434,10 @@ fn short_id(value: &str) -> &str {
 
 fn peer_word(count: usize) -> &'static str {
     if count == 1 { "peer" } else { "peers" }
+}
+
+fn elapsed_ms(started: Instant) -> u64 {
+    started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
 }
 
 fn bold(value: &str, enabled: bool) -> String {
@@ -435,5 +492,22 @@ mod tests {
         assert_eq!(user_color_code("alice"), user_color_code("alice"));
         assert!(user_color_code("alice").parse::<u8>().is_ok());
         assert_eq!(chat_prompt("alice", false), "alice › ");
+    }
+
+    #[test]
+    fn chat_packets_round_trip() {
+        let packet = ChatPacket::Presence {
+            peer: "peer-id".to_owned(),
+            name: "alice".to_owned(),
+            online_for_ms: 42,
+        };
+        let encoded = postcard::to_stdvec(&packet).unwrap();
+        assert!(matches!(
+            postcard::from_bytes(&encoded).unwrap(),
+            ChatPacket::Presence {
+                online_for_ms: 42,
+                ..
+            }
+        ));
     }
 }
