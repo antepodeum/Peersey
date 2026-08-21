@@ -31,22 +31,22 @@ Join a named open room. No secret or peer address required:
 ```rust
 use peersey::Peersey;
 
-# async fn example() -> Result<(), Box<dyn std::error::Error>> {
-let node = Peersey::new();
-let room = node.join_public_room("community/rust:general").await?;
-room.send("hello everyone").await?;
-# Ok(())
-# }
+async fn example() -> Result<(), Box<dyn std::error::Error>> {
+  let node = Peersey::new();
+  let room = node.join_public_room("community/rust:general").await?;
+  room.send("hello everyone").await?;
+  Ok(())
+}
 ```
 
 Create an unlisted open room with a random public name:
 
 ```rust
-# async fn example(node: &peersey::Peersey) -> Result<(), peersey::Error> {
-let (room, name) = node.create_public_room().await?;
-println!("public room: {name}");
-# Ok(())
-# }
+async fn example(node: &peersey::Peersey) -> Result<(), peersey::Error> {
+  let (room, name) = node.create_public_room().await?;
+  println!("public room: {name}");
+  Ok(())
+}
 ```
 
 Anyone knowing the room name can join. Peersey does not yet provide a global
@@ -60,21 +60,22 @@ Create a room:
 ```rust
 use peersey::{Peersey, RoomEvent};
 
-# async fn example() -> Result<(), peersey::Error> {
-let node = Peersey::new();
-let (room, key) = node.create_private_room().await?;
-println!("invite key: {key}");
+async fn example() -> Result<(), peersey::Error> {
+  let node = Peersey::new();
+  let (room, key) = node.create_private_room().await?;
+  println!("invite key: {key}");
 
-let mut events = room.subscribe();
-room.send("hello").await?;
+  let mut events = room.subscribe();
+  room.send("hello").await?;
 
-while let Some(event) = events.recv().await {
-    if let RoomEvent::Message { content } = event {
-        println!("{}", String::from_utf8_lossy(&content));
-    }
+  while let Some(event) = events.recv().await {
+      if let RoomEvent::Message { content } = event {
+          println!("{}", String::from_utf8_lossy(&content));
+      }
+  }
+
+  Ok(())
 }
-# Ok(())
-# }
 ```
 
 Join from another process or machine:
@@ -82,13 +83,13 @@ Join from another process or machine:
 ```rust
 use peersey::{Peersey, RoomKey};
 
-# async fn example(invite: &str) -> Result<(), Box<dyn std::error::Error>> {
-let node = Peersey::new();
-let key: RoomKey = invite.parse()?;
-let room = node.join_private_room(key).await?;
-room.send("joined").await?;
-# Ok(())
-# }
+async fn example(invite: &str) -> Result<(), Box<dyn std::error::Error>> {
+  let node = Peersey::new();
+  let key: RoomKey = invite.parse()?;
+  let room = node.join_private_room(key).await?;
+  room.send("joined").await?;
+  Ok(())
+}
 ```
 
 No public `namespace` exists. Peersey keeps protocol domain separation fixed
@@ -115,16 +116,17 @@ provide anonymity, hide all network activity, or protect a room after its
 ```rust
 use peersey::Peersey;
 
-# async fn example() -> Result<(), peersey::Error> {
-let node = Peersey::persistent("./peersey-data");
-let link = node.share_file("./video.mp4").await?;
-println!("{link}");
+async fn example() -> Result<(), peersey::Error> {
+  let node = Peersey::persistent("./peersey-data");
+  let link = node.share_file("./video.mp4").await?;
+  println!("{link}");
 
-// Keep the node alive while the file should remain available.
-tokio::signal::ctrl_c().await?;
-node.shutdown().await?;
-# Ok(())
-# }
+  // Keep the node alive while the file should remain available.
+  tokio::signal::ctrl_c().await?;
+  node.shutdown().await?;
+
+  Ok(())
+}
 ```
 
 Fetch it:
@@ -132,14 +134,15 @@ Fetch it:
 ```rust
 use peersey::{Peersey, ShareLink};
 
-# async fn example(text: &str) -> Result<(), Box<dyn std::error::Error>> {
-let node = Peersey::new();
-let link: ShareLink = text.parse()?;
-let bytes = node.fetch_file(&link, "./video.mp4").await?;
-println!("downloaded {bytes} bytes; id={}", link.content_id());
-node.shutdown().await?;
-# Ok(())
-# }
+async fn example(text: &str) -> Result<(), Box<dyn std::error::Error>> {
+  let node = Peersey::new();
+  let link: ShareLink = text.parse()?;
+  let bytes = node.fetch_file(&link, "./video.mp4").await?;
+  println!("downloaded {bytes} bytes; id={}", link.content_id());
+  node.shutdown().await?;
+
+  Ok(())
+}
 ```
 
 Files are BLAKE3 content-addressed and verified while streaming. File storage
@@ -154,17 +157,18 @@ Create a live stream and share its capability link:
 ```rust
 use peersey::Peersey;
 
-# async fn example() -> Result<(), peersey::Error> {
-let node = Peersey::new();
-let (stream, link) = node.create_live_stream().await?;
-println!("watch at: {link}");
+async fn example() -> Result<(), peersey::Error> {
+  let node = Peersey::new();
+  let (stream, link) = node.create_live_stream().await?;
+  println!("watch at: {link}");
 
-// Pass complete encoded frames or chunks from your media pipeline.
-stream.send_video("encoded H.264 frame")?;
-stream.send_audio("encoded Opus packet")?;
-stream.send_data("cursor position")?;
-# Ok(())
-# }
+  // Pass complete encoded frames or chunks from your media pipeline.
+  stream.send_video("encoded H.264 frame")?;
+  stream.send_audio("encoded Opus packet")?;
+  stream.send_data("cursor position")?;
+
+  Ok(())
+}
 ```
 
 Watch from another process or machine:
@@ -172,20 +176,21 @@ Watch from another process or machine:
 ```rust
 use peersey::{MediaKind, Peersey};
 
-# async fn example(text: &str) -> Result<(), Box<dyn std::error::Error>> {
-let node = Peersey::new();
-let link = text.parse()?;
-let mut live = node.watch_live(&link).await?;
+async fn example(text: &str) -> Result<(), Box<dyn std::error::Error>> {
+  let node = Peersey::new();
+  let link = text.parse()?;
+  let mut live = node.watch_live(&link).await?;
 
-while let Some(packet) = live.recv().await? {
-    match packet.kind {
-        MediaKind::Video => { /* decode and render packet.content */ }
-        MediaKind::Audio => { /* decode and play packet.content */ }
-        MediaKind::Data => { /* handle realtime application data */ }
-    }
+  while let Some(packet) = live.recv().await? {
+      match packet.kind {
+          MediaKind::Video => { /* decode and render packet.content */ }
+          MediaKind::Audio => { /* decode and play packet.content */ }
+          MediaKind::Data => { /* handle realtime application data */ }
+      }
+  }
+
+  Ok(())
 }
-# Ok(())
-# }
 ```
 
 Packets use separate QUIC streams, so delayed video does not block audio or
